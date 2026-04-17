@@ -26,12 +26,7 @@ contract LendingPoolTest is Test {
         vault = new CollateralVault("Vault Share", "VSS", asset);
 
         pool = new LendingPool(
-            oracle,
-            address(vault),
-            address(asset),
-            LTV_BPS,
-            LIQUIDATION_THRESHOLD_BPS,
-            LIQUIDATION_BONUS_BPS
+            oracle, address(vault), address(asset), LTV_BPS, LIQUIDATION_THRESHOLD_BPS, LIQUIDATION_BONUS_BPS
         );
 
         asset.mint(user, 1_000 ether);
@@ -87,6 +82,4 @@ contract LendingPoolTest is Test {
         vm.expectRevert(LendingPool.InsufficientCollateral.selector);
         pool.withdrawCollateral(withdrawAmount);
     }
-
-
 }

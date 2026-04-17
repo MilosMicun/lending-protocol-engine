@@ -67,7 +67,7 @@ contract VaultTest is Test {
         uint256 share2 = vault.deposit(amount, user2);
 
         assertEq(expectedShares, share2);
-        assertEq(vault.balanceOf(user2), expectedShares);  
+        assertEq(vault.balanceOf(user2), expectedShares);
     }
 
     function test_Withdraw_BurnsCorrectShares_ForRequestedAssets() public {
@@ -94,10 +94,9 @@ contract VaultTest is Test {
         assertEq(sharesBefore - sharesAfter, sharesExpected);
         assertEq(vault.totalAssets(), 100 ether);
         assertEq(vault.totalSupply(), supplyBefore - sharesExpected);
-
     }
 
-   function test_Redeem_ReturnsCorrectAssets_WhenVaultNotEmpty() public {
+    function test_Redeem_ReturnsCorrectAssets_WhenVaultNotEmpty() public {
         uint256 amount = 100 ether;
 
         vm.prank(user);
@@ -128,7 +127,6 @@ contract VaultTest is Test {
         assertEq(sharesBefore - sharesAfter, shares);
         assertEq(vault.totalSupply(), totalSupplyBefore - shares);
         assertEq(vault.totalAssets(), totalAssetsBefore - assetsReceived);
-
     }
 
     function test_Withdraw_Reverts_WhenAssetsExceedMaxWithdraw() public {
@@ -141,7 +139,7 @@ contract VaultTest is Test {
 
         vm.prank(user);
         vm.expectRevert();
-        vault.withdraw(maxAssets +1, user, user);
+        vault.withdraw(maxAssets + 1, user, user);
     }
 
     function test_Donation_IncreasesTotalAssets_ButNotTotalSupply() public {

@@ -8,5 +8,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 contract CollateralVault is ERC4626 {
     constructor(string memory name_, string memory symbol_, IERC20 underlyingAsset_)
         ERC20(name_, symbol_)
-        ERC4626(underlyingAsset_) {}
+        ERC4626(underlyingAsset_)
+    {}
 }

@@ -53,8 +53,9 @@ contract LendingPool {
         }
 
         if (
-            ltvBps_ == 0 || liquidationThresholdBps_ == 0 || liquidationBonusBps_ == 0 || ltvBps_ >= liquidationThresholdBps_
-                || liquidationThresholdBps_ > 10_000 || liquidationBonusBps_ > 10_000
+            ltvBps_ == 0 || liquidationThresholdBps_ == 0 || liquidationBonusBps_ == 0
+                || ltvBps_ >= liquidationThresholdBps_ || liquidationThresholdBps_ > 10_000
+                || liquidationBonusBps_ > 10_000
         ) {
             revert InvalidRiskParameters();
         }
@@ -84,7 +85,7 @@ contract LendingPool {
         if (amount == 0) revert ZeroAmount();
 
         uint256 collateral = collateralBalanceOf[msg.sender];
-        if (collateral < amount ) revert InsufficientCollateral();
+        if (collateral < amount) revert InsufficientCollateral();
 
         uint256 debt = debtBalanceOf[msg.sender];
         // TODO: replace this with a health factor check once borrow logic and oracle are implemented.
@@ -98,7 +99,5 @@ contract LendingPool {
         asset.safeTransfer(msg.sender, amount);
 
         emit Withdrawn(msg.sender, amount, shares);
-
-
     }
 }
