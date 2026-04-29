@@ -33,12 +33,14 @@ contract LendingPool {
     error OutstandingDebt();
     error InsufficientLiquidity();
     error BorrowExceedsLimit();
+    error NoDebt();
 
     event Deposited(address indexed user, uint256 amount, uint256 shares);
     event Withdrawn(address indexed user, uint256 amount, uint256 shares);
     event LiquidityDeposited(address indexed user, uint256 amount);
     event LiquidityWithdrawn(address indexed user, uint256 amount);
     event Borrowed(address indexed user, uint256 amount, uint256 newDebt);
+    event Repaid(address indexed user, uint256 amount, uint256 newDebt);
 
     constructor(
         address oracle_,
@@ -174,5 +176,25 @@ contract LendingPool {
 
     function maxBorrowOf(address user) public view returns (uint256) {
         return getCollateralAssets(user) * ltvBps / 10_000;
+    }
+
+    function repay(uint256 amount) external {
+        if (amount == 0) revert ZeroAmount();
+
+        uint256 debt = debtBalanceOf[msg.sender];
+
+        if (debt == 0) revert NoDebt();
+
+        // Cap repayment at actual debt — no revert on overpayment, excess is ignored.
+        uint256 repayAmount = amount > debt ? debt : amount;
+
+        uint256 newDebt = debt - repayAmount;
+
+        debtBalanceOf[msg.sender] = newDebt;
+        totalDebt -= repayAmount;
+
+        asset.safeTransferFrom(msg.sender, address(this), repayAmount);
+
+        emit Repaid(msg.sender, repayAmount, newDebt);
     }
 }

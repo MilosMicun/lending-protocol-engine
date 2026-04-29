@@ -7,6 +7,8 @@ import {CollateralVault} from "../../../src/core/vault/CollateralVault.sol";
 import {LendingPool} from "../../../src/core/lending/LendingPool.sol";
 
 contract LendingPoolTest is Test {
+    event Repaid(address indexed user, uint256 amount, uint256 newDebt);
+
     MockERC20 internal asset;
     CollateralVault internal vault;
     LendingPool internal pool;
@@ -39,6 +41,17 @@ contract LendingPoolTest is Test {
 
         vm.prank(lp);
         asset.approve(address(pool), type(uint256).max);
+    }
+
+    function _setupBorrowedPosition(uint256 liquidityAmount, uint256 collateralAmount, uint256 borrowAmount) internal {
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
     }
 
     function test_DepositCollateral_UpdatesUserAndTotalCollateralShares() public {
@@ -262,5 +275,83 @@ contract LendingPoolTest is Test {
         assertEq(pool.debtBalanceOf(user), firstBorrow + secondBorrow);
         assertEq(pool.totalDebt(), firstBorrow + secondBorrow);
         assertEq(pool.availableLiquidity(), liquidityAmount - firstBorrow - secondBorrow);
+    }
+
+    function test_Repay_RevertsIfZeroAmount() public {
+        vm.prank(user);
+        vm.expectRevert(LendingPool.ZeroAmount.selector);
+        pool.repay(0);
+    }
+
+    function test_Repay_RevertsIfUserHasNoDebt() public {
+        vm.prank(user);
+        vm.expectRevert(LendingPool.NoDebt.selector);
+        pool.repay(1 ether);
+    }
+
+    function test_Repay_ReducesUserDebtAndTotalDebt_OnPartialRepay() public {
+        _setupBorrowedPosition(1000 ether, 100 ether, 50 ether);
+
+        vm.prank(user);
+        pool.repay(20 ether);
+
+        assertEq(pool.debtBalanceOf(user), 30 ether);
+        assertEq(pool.totalDebt(), 30 ether);
+        assertEq(pool.availableLiquidity(), 970 ether);
+        assertEq(asset.balanceOf(address(pool)), 1000 ether - 50 ether + 20 ether);
+    }
+
+    function test_Repay_ClearsUserDebt_OnFullRepay() public {
+        _setupBorrowedPosition(1000 ether, 100 ether, 50 ether);
+
+        vm.prank(user);
+        pool.repay(50 ether);
+
+        assertEq(pool.debtBalanceOf(user), 0);
+        assertEq(pool.totalDebt(), 0);
+        assertEq(pool.availableLiquidity(), 1000 ether);
+        assertEq(asset.balanceOf(address(pool)), 1000 ether - 50 ether + 50 ether);
+    }
+
+    function test_Repay_OverpayOnlyTakesDebtAmount() public {
+        _setupBorrowedPosition(1000 ether, 100 ether, 50 ether);
+
+        vm.prank(user);
+        pool.repay(100 ether);
+
+        assertEq(pool.debtBalanceOf(user), 0);
+        assertEq(pool.totalDebt(), 0);
+        assertEq(pool.availableLiquidity(), 1000 ether);
+        assertEq(asset.balanceOf(address(pool)), 1000 ether - 50 ether + 50 ether);
+        assertEq(asset.balanceOf(user), 900 ether);
+    }
+
+    function test_Repay_IncreasesAvailableLiquidity() public {
+        _setupBorrowedPosition(1000 ether, 100 ether, 50 ether);
+
+        uint256 beforeLiquidity = pool.availableLiquidity();
+
+        uint256 repayAmount = 50 ether;
+
+        vm.prank(user);
+        pool.repay(repayAmount);
+
+        uint256 afterLiquidity = pool.availableLiquidity();
+
+        assertEq(afterLiquidity, beforeLiquidity + repayAmount);
+    }
+
+    function test_Repay_EmitsRepaidEvent() public {
+        _setupBorrowedPosition(1000 ether, 100 ether, 50 ether);
+
+        uint256 repayAmount = 20 ether;
+        uint256 expectedNewDebt = 30 ether;
+
+        vm.prank(user);
+        vm.expectEmit(true, false, false, true);
+
+        emit Repaid(user, repayAmount, expectedNewDebt);
+
+        pool.repay(repayAmount);
     }
 }
