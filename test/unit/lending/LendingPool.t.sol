@@ -5,8 +5,11 @@ import {Test} from "forge-std/Test.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {CollateralVault} from "../../../src/core/vault/CollateralVault.sol";
 import {LendingPool} from "../../../src/core/lending/LendingPool.sol";
+import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 
 contract LendingPoolTest is Test {
+    using stdStorage for StdStorage;
+
     event Repaid(address indexed user, uint256 amount, uint256 newDebt);
 
     MockERC20 internal asset;
@@ -16,15 +19,18 @@ contract LendingPoolTest is Test {
     address internal user;
     address internal lp;
     address internal oracle;
+    address internal liquidator;
 
     uint256 internal constant LTV_BPS = 7_000;
     uint256 internal constant LIQUIDATION_THRESHOLD_BPS = 8_000;
     uint256 internal constant LIQUIDATION_BONUS_BPS = 500;
+    uint256 internal constant BPS = 10_000;
 
     function setUp() public {
         user = makeAddr("user");
         lp = makeAddr("lp");
         oracle = makeAddr("oracle");
+        liquidator = makeAddr("liquidator");
 
         asset = new MockERC20("Asset Token", "ASS");
         vault = new CollateralVault("Vault Share", "VSS", asset);
@@ -35,11 +41,15 @@ contract LendingPoolTest is Test {
 
         asset.mint(user, 1_000 ether);
         asset.mint(lp, 1_000 ether);
+        asset.mint(liquidator, 1_000 ether);
 
         vm.prank(user);
         asset.approve(address(pool), type(uint256).max);
 
         vm.prank(lp);
+        asset.approve(address(pool), type(uint256).max);
+
+        vm.prank(liquidator);
         asset.approve(address(pool), type(uint256).max);
     }
 
@@ -52,6 +62,15 @@ contract LendingPoolTest is Test {
 
         vm.prank(user);
         pool.borrow(borrowAmount);
+    }
+
+    function _makePositionLiquidatable(uint256 collateralAmount, uint256 inflatedDebt) internal {
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        stdstore.target(address(pool)).sig("debtBalanceOf(address)").with_key(user).checked_write(inflatedDebt);
+
+        stdstore.target(address(pool)).sig("totalDebt()").checked_write(inflatedDebt);
     }
 
     function test_DepositCollateral_UpdatesUserAndTotalCollateralShares() public {
@@ -353,5 +372,138 @@ contract LendingPoolTest is Test {
         emit Repaid(user, repayAmount, expectedNewDebt);
 
         pool.repay(repayAmount);
+    }
+
+    function test_Liquidate_RevertsIfRepayAmountIsZero() public {
+        vm.prank(liquidator);
+        vm.expectRevert(LendingPool.ZeroAmount.selector);
+        pool.liquidate(user, 0);
+    }
+
+    function test_Liquidate_RevertsIfBorrowerIsZeroAddress() public {
+        vm.prank(liquidator);
+        vm.expectRevert(LendingPool.ZeroAddress.selector);
+        pool.liquidate(address(0), 100 ether);
+    }
+
+    function test_Liquidate_RevertsOnSelfLiquidation() public {
+        vm.prank(user);
+        vm.expectRevert(LendingPool.SelfLiquidation.selector);
+        pool.liquidate(user, 100 ether);
+    }
+
+    function test_Liquidate_RevertsIfBorrowerHasNoDebt() public {
+        vm.prank(liquidator);
+        vm.expectRevert(LendingPool.NoDebt.selector);
+        pool.liquidate(user, 100 ether);
+    }
+
+    function test_Liquidate_RevertsIfPositionIsHealthy() public {
+        vm.prank(lp);
+        pool.depositLiquidity(1_000 ether);
+
+        vm.prank(user);
+        pool.depositCollateral(1_000 ether);
+
+        vm.prank(user);
+        pool.borrow(700 ether); // 70% LTV, threshold 80% → HF > 1
+
+        vm.prank(liquidator);
+        vm.expectRevert(LendingPool.PositionNotLiquidatable.selector);
+        pool.liquidate(user, 100 ether);
+    }
+
+    function test_Liquidate_ReducesBorrowerDebt() public {
+        uint256 collateral = 1_000 ether;
+        uint256 inflatedDebt = 900 ether; // 900 > 800 → liquidatable
+        uint256 repayAmount = 100 ether;
+
+        _makePositionLiquidatable(collateral, inflatedDebt);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        assertEq(pool.debtBalanceOf(user), inflatedDebt - repayAmount);
+    }
+
+    function test_Liquidate_ReducesTotalDebt() public {
+        uint256 collateral = 1_000 ether;
+        uint256 inflatedDebt = 900 ether;
+        uint256 repayAmount = 100 ether;
+
+        _makePositionLiquidatable(collateral, inflatedDebt);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        assertEq(pool.totalDebt(), inflatedDebt - repayAmount);
+    }
+
+    function test_Liquidate_ReducesBorrowerCollateralShares() public {
+        uint256 collateral = 1_000 ether;
+        uint256 inflatedDebt = 900 ether;
+        uint256 repayAmount = 100 ether;
+
+        _makePositionLiquidatable(collateral, inflatedDebt);
+
+        uint256 sharesBefore = pool.collateralSharesOf(user);
+        uint256 collateralToSeize = repayAmount * (BPS + LIQUIDATION_BONUS_BPS) / BPS; // 105 ether
+        uint256 expectedSeizedShares = vault.previewWithdraw(collateralToSeize);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        assertEq(pool.collateralSharesOf(user), sharesBefore - expectedSeizedShares);
+        assertEq(pool.totalCollateralShares(), sharesBefore - expectedSeizedShares);
+    }
+
+    function test_Liquidate_SendsSeizedAssetsToLiquidator() public {
+        uint256 collateral = 1_000 ether;
+        uint256 inflatedDebt = 900 ether;
+        uint256 repayAmount = 100 ether;
+
+        _makePositionLiquidatable(collateral, inflatedDebt);
+
+        uint256 liquidatorBalanceBefore = asset.balanceOf(liquidator);
+        uint256 expectedSeized = repayAmount * (BPS + LIQUIDATION_BONUS_BPS) / BPS; // 105 ether
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        assertEq(asset.balanceOf(liquidator), liquidatorBalanceBefore - repayAmount + expectedSeized);
+    }
+
+    function test_Liquidate_CapsRepayWhenCollateralCannotCoverDebtPlusBonus() public {
+        uint256 collateral = 100 ether;
+        uint256 inflatedDebt = 96 ether; // 96 > 80 → liquidatable
+        // maxRepayCovered = 100 * 10000 / 10500 ≈ 95.238 ether < 96 → cap is active
+
+        _makePositionLiquidatable(collateral, inflatedDebt);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, inflatedDebt);
+
+        uint256 expectedMaxRepay = collateral * BPS / (BPS + LIQUIDATION_BONUS_BPS);
+
+        assertGt(pool.debtBalanceOf(user), 0);
+
+        assertEq(pool.debtBalanceOf(user), inflatedDebt - expectedMaxRepay);
+    }
+
+    function test_Liquidate_ReducesProtocolVaultShares() public {
+        uint256 collateral = 1_000 ether;
+        uint256 inflatedDebt = 900 ether;
+        uint256 repayAmount = 100 ether;
+
+        _makePositionLiquidatable(collateral, inflatedDebt);
+
+        uint256 vaultSharesBefore = vault.balanceOf(address(pool));
+        uint256 collateralToSeize = repayAmount * (BPS + LIQUIDATION_BONUS_BPS) / BPS;
+        uint256 expectedSeizedShares = vault.previewWithdraw(collateralToSeize);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        assertEq(vault.balanceOf(address(pool)), vaultSharesBefore - expectedSeizedShares);
     }
 }

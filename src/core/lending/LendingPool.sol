@@ -12,6 +12,9 @@ contract LendingPool {
     uint256 public liquidationThresholdBps;
     uint256 public liquidationBonusBps;
 
+    uint256 private constant BPS = 10_000;
+    uint256 private constant WAD = 1e18;
+
     CollateralVault public vault;
     // Oracle is accepted now but integrated in Day 85 for collateral valuation.
     address public oracle;
@@ -34,6 +37,10 @@ contract LendingPool {
     error InsufficientLiquidity();
     error BorrowExceedsLimit();
     error NoDebt();
+    error PositionNotLiquidatable();
+    error NothingToLiquidate();
+    error SelfLiquidation();
+    error BadDebt();
 
     event Deposited(address indexed user, uint256 amount, uint256 shares);
     event Withdrawn(address indexed user, uint256 amount, uint256 shares);
@@ -41,6 +48,13 @@ contract LendingPool {
     event LiquidityWithdrawn(address indexed user, uint256 amount);
     event Borrowed(address indexed user, uint256 amount, uint256 newDebt);
     event Repaid(address indexed user, uint256 amount, uint256 newDebt);
+    event Liquidated(
+        address indexed liquidator,
+        address indexed borrower,
+        uint256 repaidAmount,
+        uint256 seizedShares,
+        uint256 seizedAssets
+    );
 
     constructor(
         address oracle_,
@@ -175,7 +189,7 @@ contract LendingPool {
     }
 
     function maxBorrowOf(address user) public view returns (uint256) {
-        return getCollateralAssets(user) * ltvBps / 10_000;
+        return getCollateralAssets(user) * ltvBps / BPS;
     }
 
     function repay(uint256 amount) external {
@@ -196,5 +210,67 @@ contract LendingPool {
         asset.safeTransferFrom(msg.sender, address(this), repayAmount);
 
         emit Repaid(msg.sender, repayAmount, newDebt);
+    }
+
+    function getHealthFactor(address user) public view returns (uint256) {
+        uint256 collateralAssets = getCollateralAssets(user);
+        uint256 debt = debtBalanceOf[user];
+
+        return _healthFactor(collateralAssets, debt);
+    }
+
+    function _healthFactor(uint256 collateralAssets, uint256 debt) internal view returns (uint256) {
+        if (debt == 0) return type(uint256).max;
+
+        uint256 adjustedCollateral = collateralAssets * liquidationThresholdBps / BPS;
+
+        return adjustedCollateral * WAD / debt;
+    }
+
+    function isLiquidatable(address user) public view returns (bool) {
+        uint256 debt = debtBalanceOf[user];
+
+        if (debt == 0) return false;
+
+        return getHealthFactor(user) < WAD;
+    }
+
+    function liquidate(address borrower, uint256 repayAmount) external {
+        if (borrower == address(0)) revert ZeroAddress();
+        if (msg.sender == borrower) revert SelfLiquidation();
+        if (repayAmount == 0) revert ZeroAmount();
+
+        uint256 debt = debtBalanceOf[borrower];
+        if (debt == 0) revert NoDebt();
+        if (!isLiquidatable(borrower)) revert PositionNotLiquidatable();
+
+        uint256 desiredRepay = repayAmount > debt ? debt : repayAmount;
+        uint256 collateralAssets = getCollateralAssets(borrower);
+
+        // If collateral cannot cover requested repayment plus liquidation bonus,
+        // repayment is capped to the maximum economically covered amount.
+        // Any remaining debt after all collateral is seized represents bad debt
+        // and would require reserves / insurance / loss accounting in production.
+        uint256 maxRepayCovered = collateralAssets * BPS / (BPS + liquidationBonusBps);
+
+        uint256 actualRepay = desiredRepay > maxRepayCovered ? maxRepayCovered : desiredRepay;
+        if (actualRepay == 0) revert BadDebt();
+
+        // Collateral seized includes liquidation bonus to incentivize liquidators.
+        uint256 collateralToSeizeAssets = actualRepay * (BPS + liquidationBonusBps) / BPS;
+
+        uint256 seizedShares = vault.previewWithdraw(collateralToSeizeAssets);
+
+        debtBalanceOf[borrower] -= actualRepay;
+        totalDebt -= actualRepay;
+
+        collateralSharesOf[borrower] -= seizedShares;
+        totalCollateralShares -= seizedShares;
+
+        asset.safeTransferFrom(msg.sender, address(this), actualRepay);
+
+        uint256 assetsOut = vault.redeem(seizedShares, msg.sender, address(this));
+
+        emit Liquidated(msg.sender, borrower, actualRepay, seizedShares, assetsOut);
     }
 }
