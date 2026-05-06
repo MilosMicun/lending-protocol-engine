@@ -6,6 +6,8 @@ import {MockERC20} from "../../mocks/MockERC20.sol";
 import {CollateralVault} from "../../../src/core/vault/CollateralVault.sol";
 import {LendingPool} from "../../../src/core/lending/LendingPool.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
+import {MockV3Aggregator} from "../../mocks/MockV3Aggregator.sol";
+import {OracleLib} from "../../../src/lib/OracleLib.sol";
 
 contract LendingPoolTest is Test {
     using stdStorage for StdStorage;
@@ -18,25 +20,34 @@ contract LendingPoolTest is Test {
 
     address internal user;
     address internal lp;
-    address internal oracle;
+    MockV3Aggregator internal priceFeed;
     address internal liquidator;
 
     uint256 internal constant LTV_BPS = 7_000;
     uint256 internal constant LIQUIDATION_THRESHOLD_BPS = 8_000;
     uint256 internal constant LIQUIDATION_BONUS_BPS = 500;
     uint256 internal constant BPS = 10_000;
+    uint256 internal constant MAX_PRICE_STALENESS = 1 days;
+    uint8 internal constant PRICE_DECIMALS = 8;
+    int256 internal constant INITIAL_PRICE = 1e8;
 
     function setUp() public {
         user = makeAddr("user");
         lp = makeAddr("lp");
-        oracle = makeAddr("oracle");
         liquidator = makeAddr("liquidator");
 
         asset = new MockERC20("Asset Token", "ASS");
         vault = new CollateralVault("Vault Share", "VSS", asset);
+        priceFeed = new MockV3Aggregator(PRICE_DECIMALS, INITIAL_PRICE, block.timestamp);
 
         pool = new LendingPool(
-            oracle, address(vault), address(asset), LTV_BPS, LIQUIDATION_THRESHOLD_BPS, LIQUIDATION_BONUS_BPS
+            address(priceFeed),
+            address(vault),
+            address(asset),
+            MAX_PRICE_STALENESS,
+            LTV_BPS,
+            LIQUIDATION_THRESHOLD_BPS,
+            LIQUIDATION_BONUS_BPS
         );
 
         asset.mint(user, 1_000 ether);
@@ -505,5 +516,135 @@ contract LendingPoolTest is Test {
         pool.liquidate(user, repayAmount);
 
         assertEq(vault.balanceOf(address(pool)), vaultSharesBefore - expectedSeizedShares);
+    }
+
+    function test_GetCollateralValue_NormalizesOraclePriceToWad() public {
+        uint256 collateral = 100 ether;
+
+        vm.prank(user);
+        pool.depositCollateral(collateral);
+
+        priceFeed.setAnswer(2_000e8);
+
+        assertEq(pool.getCollateralValue(user), 200_000 ether);
+    }
+
+    function test_GetCollateralValue_RevertsIfOraclePriceIsInvalid() public {
+        uint256 collateral = 100 ether;
+
+        vm.prank(user);
+        pool.depositCollateral(collateral);
+
+        priceFeed.setAnswer(0);
+
+        vm.expectRevert(OracleLib.InvalidPrice.selector);
+        pool.getCollateralValue(user);
+    }
+
+    function test_GetCollateralValue_RevertsIfPriceIsStale() public {
+        uint256 collateral = 100 ether;
+
+        vm.prank(user);
+        pool.depositCollateral(collateral);
+
+        vm.warp(10 days);
+
+        priceFeed.setUpdatedAt(block.timestamp - MAX_PRICE_STALENESS - 1);
+
+        vm.expectRevert(OracleLib.StalePrice.selector);
+        pool.getCollateralValue(user);
+    }
+
+    function test_HealthFactor_DecreasesAfterPriceDrop() public {
+        uint256 collateral = 100 ether;
+        uint256 liquidity = 1_000 ether;
+        uint256 borrowAmount = 70 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidity);
+
+        vm.prank(user);
+        pool.depositCollateral(collateral);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        uint256 healthFactorBefore = pool.getHealthFactor(user);
+
+        priceFeed.setAnswer(5e7); // $0.5 with 8 decimals
+
+        uint256 healthFactorAfter = pool.getHealthFactor(user);
+
+        assertGt(healthFactorBefore, healthFactorAfter);
+    }
+
+    function test_Liquidate_AllowsLiquidationAfterPriceDrop() public {
+        uint256 collateral = 100 ether;
+        uint256 liquidity = 1_000 ether;
+        uint256 borrowAmount = 70 ether;
+        uint256 repayAmount = 20 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidity);
+
+        vm.prank(user);
+        pool.depositCollateral(collateral);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        priceFeed.setAnswer(5e7);
+        assertTrue(pool.isLiquidatable(user));
+
+        uint256 debtBefore = pool.debtBalanceOf(user);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        assertEq(pool.debtBalanceOf(user), debtBefore - repayAmount);
+    }
+
+    function test_MaxBorrowOf_UsesOracleValue() public {
+        uint256 collateral = 100 ether;
+        uint256 liquidity = 1_000 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidity);
+
+        vm.prank(user);
+        pool.depositCollateral(collateral);
+
+        priceFeed.setAnswer(2e8);
+
+        uint256 expectedMaxBorrow = 140 ether;
+
+        assertEq(pool.maxBorrowOf(user), expectedMaxBorrow);
+
+        vm.prank(user);
+        pool.borrow(expectedMaxBorrow);
+
+        assertEq(pool.debtBalanceOf(user), expectedMaxBorrow);
+    }
+
+    function test_WithdrawCollateral_RevertsIfPriceDropMakesPositionUnsafe() public {
+        uint256 collateral = 100 ether;
+        uint256 liquidity = 1_000 ether;
+        uint256 borrowAmount = 70 ether;
+        uint256 withdrawAmount = 60 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidity);
+
+        vm.prank(user);
+        pool.depositCollateral(collateral);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        priceFeed.setAnswer(5e7);
+
+        vm.prank(user);
+        vm.expectRevert(LendingPool.HealthFactorTooLow.selector);
+        pool.withdrawCollateral(withdrawAmount);
     }
 }

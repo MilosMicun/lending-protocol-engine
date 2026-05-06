@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import {CollateralVault} from "../vault/CollateralVault.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IPriceFeed} from "../../interfaces/IPriceFeed.sol";
+import {OracleLib} from "../../lib/OracleLib.sol";
 
 contract LendingPool {
     using SafeERC20 for IERC20;
@@ -16,9 +18,11 @@ contract LendingPool {
     uint256 private constant WAD = 1e18;
 
     CollateralVault public vault;
-    // Oracle is accepted now but integrated in Day 85 for collateral valuation.
-    address public oracle;
-    IERC20 public asset;
+    IPriceFeed public priceFeed;
+    IERC20 public debtAsset;
+    IERC20 public collateralAsset;
+
+    uint256 public maxPriceStaleness;
 
     uint256 public totalDebt;
     uint256 public totalCollateralShares;
@@ -31,16 +35,15 @@ contract LendingPool {
     error ZeroAddress();
     error InvalidRiskParameters();
     error ZeroAmount();
-    error AssetMismatch();
     error InsufficientCollateral();
-    error OutstandingDebt();
     error InsufficientLiquidity();
     error BorrowExceedsLimit();
     error NoDebt();
     error PositionNotLiquidatable();
-    error NothingToLiquidate();
     error SelfLiquidation();
     error BadDebt();
+    error HealthFactorTooLow();
+    error InvalidStalenessWindow();
 
     event Deposited(address indexed user, uint256 amount, uint256 shares);
     event Withdrawn(address indexed user, uint256 amount, uint256 shares);
@@ -48,6 +51,7 @@ contract LendingPool {
     event LiquidityWithdrawn(address indexed user, uint256 amount);
     event Borrowed(address indexed user, uint256 amount, uint256 newDebt);
     event Repaid(address indexed user, uint256 amount, uint256 newDebt);
+
     event Liquidated(
         address indexed liquidator,
         address indexed borrower,
@@ -57,32 +61,34 @@ contract LendingPool {
     );
 
     constructor(
-        address oracle_,
+        address priceFeed_,
         address vault_,
-        address asset_,
+        address debtAsset_,
+        uint256 maxPriceStaleness_,
         uint256 ltvBps_,
         uint256 liquidationThresholdBps_,
         uint256 liquidationBonusBps_
     ) {
-        if (oracle_ == address(0) || vault_ == address(0) || asset_ == address(0)) {
+        if (priceFeed_ == address(0) || vault_ == address(0) || debtAsset_ == address(0)) {
             revert ZeroAddress();
         }
 
-        oracle = oracle_;
-        vault = CollateralVault(vault_);
-        asset = IERC20(asset_);
-
-        if (vault.asset() != asset_) {
-            revert AssetMismatch();
+        if (maxPriceStaleness_ == 0) {
+            revert InvalidStalenessWindow();
         }
 
         if (
             ltvBps_ == 0 || liquidationThresholdBps_ == 0 || liquidationBonusBps_ == 0
-                || ltvBps_ >= liquidationThresholdBps_ || liquidationThresholdBps_ > 10_000
-                || liquidationBonusBps_ > 10_000
+                || ltvBps_ >= liquidationThresholdBps_ || liquidationThresholdBps_ > BPS || liquidationBonusBps_ > BPS
         ) {
             revert InvalidRiskParameters();
         }
+
+        priceFeed = IPriceFeed(priceFeed_);
+        vault = CollateralVault(vault_);
+        collateralAsset = IERC20(vault.asset());
+        debtAsset = IERC20(debtAsset_);
+        maxPriceStaleness = maxPriceStaleness_;
 
         ltvBps = ltvBps_;
         liquidationThresholdBps = liquidationThresholdBps_;
@@ -90,12 +96,10 @@ contract LendingPool {
     }
 
     function depositCollateral(uint256 amount) external {
-        if (amount == 0) {
-            revert ZeroAmount();
-        }
+        if (amount == 0) revert ZeroAmount();
 
-        asset.safeTransferFrom(msg.sender, address(this), amount);
-        asset.forceApprove(address(vault), amount);
+        collateralAsset.safeTransferFrom(msg.sender, address(this), amount);
+        collateralAsset.forceApprove(address(vault), amount);
 
         uint256 shares = vault.deposit(amount, address(this));
 
@@ -113,27 +117,32 @@ contract LendingPool {
         uint256 collateral = collateralSharesOf[msg.sender];
         if (collateral < sharesNeeded) revert InsufficientCollateral();
 
+        uint256 remainingCollateralAssets = getCollateralAssets(msg.sender) - amount;
         uint256 debt = debtBalanceOf[msg.sender];
-        // TODO: replace this with a health factor check once borrow logic and oracle are implemented.
-        // Current behavior blocks all withdrawals if any debt exists, which is overly restrictive.
-        if (debt != 0) revert OutstandingDebt();
+
+        if (debt != 0) {
+            uint256 priceWad = OracleLib.getFreshPriceWad(priceFeed, maxPriceStaleness);
+            uint256 remainingCollateralValue = remainingCollateralAssets * priceWad / WAD;
+
+            if (_healthFactor(remainingCollateralValue, debt) < WAD) {
+                revert HealthFactorTooLow();
+            }
+        }
 
         uint256 shares = vault.withdraw(amount, address(this), address(this));
 
         collateralSharesOf[msg.sender] -= shares;
         totalCollateralShares -= shares;
 
-        asset.safeTransfer(msg.sender, amount);
+        collateralAsset.safeTransfer(msg.sender, amount);
 
         emit Withdrawn(msg.sender, amount, shares);
     }
 
     function depositLiquidity(uint256 amount) external {
-        if (amount == 0) {
-            revert ZeroAmount();
-        }
+        if (amount == 0) revert ZeroAmount();
 
-        asset.safeTransferFrom(msg.sender, address(this), amount);
+        debtAsset.safeTransferFrom(msg.sender, address(this), amount);
 
         liquidityBalanceOf[msg.sender] += amount;
         totalLiquidity += amount;
@@ -153,7 +162,7 @@ contract LendingPool {
         liquidityBalanceOf[msg.sender] -= amount;
         totalLiquidity -= amount;
 
-        asset.safeTransfer(msg.sender, amount);
+        debtAsset.safeTransfer(msg.sender, amount);
 
         emit LiquidityWithdrawn(msg.sender, amount);
     }
@@ -167,7 +176,6 @@ contract LendingPool {
 
         if (collateralSharesOf[msg.sender] == 0) revert InsufficientCollateral();
 
-        // Until oracle integration, collateral and borrow asset are assumed to have 1:1 value.
         uint256 maxBorrow = maxBorrowOf(msg.sender);
         uint256 newDebt = debtBalanceOf[msg.sender] + amount;
 
@@ -179,52 +187,98 @@ contract LendingPool {
         debtBalanceOf[msg.sender] = newDebt;
         totalDebt += amount;
 
-        asset.safeTransfer(msg.sender, amount);
+        debtAsset.safeTransfer(msg.sender, amount);
 
         emit Borrowed(msg.sender, amount, newDebt);
-    }
-
-    function getCollateralAssets(address user) public view returns (uint256) {
-        return vault.convertToAssets(collateralSharesOf[user]);
-    }
-
-    function maxBorrowOf(address user) public view returns (uint256) {
-        return getCollateralAssets(user) * ltvBps / BPS;
     }
 
     function repay(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
 
         uint256 debt = debtBalanceOf[msg.sender];
-
         if (debt == 0) revert NoDebt();
 
-        // Cap repayment at actual debt — no revert on overpayment, excess is ignored.
         uint256 repayAmount = amount > debt ? debt : amount;
-
         uint256 newDebt = debt - repayAmount;
 
         debtBalanceOf[msg.sender] = newDebt;
         totalDebt -= repayAmount;
 
-        asset.safeTransferFrom(msg.sender, address(this), repayAmount);
+        debtAsset.safeTransferFrom(msg.sender, address(this), repayAmount);
 
         emit Repaid(msg.sender, repayAmount, newDebt);
     }
 
-    function getHealthFactor(address user) public view returns (uint256) {
-        uint256 collateralAssets = getCollateralAssets(user);
-        uint256 debt = debtBalanceOf[user];
+    function liquidate(address borrower, uint256 repayAmount) external {
+        if (borrower == address(0)) revert ZeroAddress();
+        if (msg.sender == borrower) revert SelfLiquidation();
+        if (repayAmount == 0) revert ZeroAmount();
 
-        return _healthFactor(collateralAssets, debt);
+        uint256 debt = debtBalanceOf[borrower];
+        if (debt == 0) revert NoDebt();
+
+        uint256 priceWad = OracleLib.getFreshPriceWad(priceFeed, maxPriceStaleness);
+
+        uint256 borrowerCollateralAssets = getCollateralAssets(borrower);
+        uint256 collateralValue = borrowerCollateralAssets * priceWad / WAD;
+
+        if (_healthFactor(collateralValue, debt) >= WAD) {
+            revert PositionNotLiquidatable();
+        }
+
+        uint256 desiredRepay = repayAmount > debt ? debt : repayAmount;
+        uint256 actualRepay = desiredRepay;
+
+        uint256 repayValueWithBonus = actualRepay * (BPS + liquidationBonusBps) / BPS;
+        uint256 collateralToSeizeAssets = _collateralAssetsForDebtValue(repayValueWithBonus, priceWad);
+
+        if (collateralToSeizeAssets > borrowerCollateralAssets) {
+            collateralToSeizeAssets = borrowerCollateralAssets;
+
+            actualRepay = collateralValue * BPS / (BPS + liquidationBonusBps);
+
+            if (actualRepay > desiredRepay) {
+                actualRepay = desiredRepay;
+            }
+
+            if (actualRepay == 0) revert BadDebt();
+        }
+
+        uint256 seizedShares = vault.previewWithdraw(collateralToSeizeAssets);
+
+        debtBalanceOf[borrower] -= actualRepay;
+        totalDebt -= actualRepay;
+
+        collateralSharesOf[borrower] -= seizedShares;
+        totalCollateralShares -= seizedShares;
+
+        debtAsset.safeTransferFrom(msg.sender, address(this), actualRepay);
+
+        uint256 assetsOut = vault.redeem(seizedShares, msg.sender, address(this));
+
+        emit Liquidated(msg.sender, borrower, actualRepay, seizedShares, assetsOut);
     }
 
-    function _healthFactor(uint256 collateralAssets, uint256 debt) internal view returns (uint256) {
-        if (debt == 0) return type(uint256).max;
+    function getCollateralAssets(address user) public view returns (uint256) {
+        return vault.convertToAssets(collateralSharesOf[user]);
+    }
 
-        uint256 adjustedCollateral = collateralAssets * liquidationThresholdBps / BPS;
+    function getCollateralValue(address user) public view returns (uint256) {
+        uint256 collateralAssets = getCollateralAssets(user);
+        uint256 priceWad = OracleLib.getFreshPriceWad(priceFeed, maxPriceStaleness);
 
-        return adjustedCollateral * WAD / debt;
+        return collateralAssets * priceWad / WAD;
+    }
+
+    function maxBorrowOf(address user) public view returns (uint256) {
+        return getCollateralValue(user) * ltvBps / BPS;
+    }
+
+    function getHealthFactor(address user) public view returns (uint256) {
+        uint256 collateralValue = getCollateralValue(user);
+        uint256 debt = debtBalanceOf[user];
+
+        return _healthFactor(collateralValue, debt);
     }
 
     function isLiquidatable(address user) public view returns (bool) {
@@ -235,42 +289,15 @@ contract LendingPool {
         return getHealthFactor(user) < WAD;
     }
 
-    function liquidate(address borrower, uint256 repayAmount) external {
-        if (borrower == address(0)) revert ZeroAddress();
-        if (msg.sender == borrower) revert SelfLiquidation();
-        if (repayAmount == 0) revert ZeroAmount();
+    function _healthFactor(uint256 collateralValue, uint256 debt) internal view returns (uint256) {
+        if (debt == 0) return type(uint256).max;
 
-        uint256 debt = debtBalanceOf[borrower];
-        if (debt == 0) revert NoDebt();
-        if (!isLiquidatable(borrower)) revert PositionNotLiquidatable();
+        uint256 adjustedCollateralValue = collateralValue * liquidationThresholdBps / BPS;
 
-        uint256 desiredRepay = repayAmount > debt ? debt : repayAmount;
-        uint256 collateralAssets = getCollateralAssets(borrower);
+        return adjustedCollateralValue * WAD / debt;
+    }
 
-        // If collateral cannot cover requested repayment plus liquidation bonus,
-        // repayment is capped to the maximum economically covered amount.
-        // Any remaining debt after all collateral is seized represents bad debt
-        // and would require reserves / insurance / loss accounting in production.
-        uint256 maxRepayCovered = collateralAssets * BPS / (BPS + liquidationBonusBps);
-
-        uint256 actualRepay = desiredRepay > maxRepayCovered ? maxRepayCovered : desiredRepay;
-        if (actualRepay == 0) revert BadDebt();
-
-        // Collateral seized includes liquidation bonus to incentivize liquidators.
-        uint256 collateralToSeizeAssets = actualRepay * (BPS + liquidationBonusBps) / BPS;
-
-        uint256 seizedShares = vault.previewWithdraw(collateralToSeizeAssets);
-
-        debtBalanceOf[borrower] -= actualRepay;
-        totalDebt -= actualRepay;
-
-        collateralSharesOf[borrower] -= seizedShares;
-        totalCollateralShares -= seizedShares;
-
-        asset.safeTransferFrom(msg.sender, address(this), actualRepay);
-
-        uint256 assetsOut = vault.redeem(seizedShares, msg.sender, address(this));
-
-        emit Liquidated(msg.sender, borrower, actualRepay, seizedShares, assetsOut);
+    function _collateralAssetsForDebtValue(uint256 debtValue, uint256 priceWad) internal pure returns (uint256) {
+        return debtValue * WAD / priceWad;
     }
 }
