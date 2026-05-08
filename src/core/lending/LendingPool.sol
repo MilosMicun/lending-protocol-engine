@@ -16,6 +16,7 @@ contract LendingPool {
 
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
+    uint256 private constant SECONDS_PER_YEAR = 365 days;
 
     CollateralVault public vault;
     IPriceFeed public priceFeed;
@@ -24,16 +25,23 @@ contract LendingPool {
 
     uint256 public maxPriceStaleness;
 
-    uint256 public totalDebt;
+    uint256 public borrowIndex;
+    uint256 public lastBorrowIndexUpdate;
     uint256 public totalCollateralShares;
     uint256 public totalLiquidity;
+    uint256 public baseBorrowRate;
+    uint256 public borrowRateSlope;
 
-    mapping(address => uint256) public debtBalanceOf;
+    uint256 public totalScaledDebt;
+    mapping(address => uint256) public scaledDebtOf;
+
     mapping(address => uint256) public collateralSharesOf;
     mapping(address => uint256) public liquidityBalanceOf;
 
     error ZeroAddress();
     error InvalidRiskParameters();
+    error InvalidInterestRateModel();
+    error InvalidStalenessWindow();
     error ZeroAmount();
     error InsufficientCollateral();
     error InsufficientLiquidity();
@@ -43,7 +51,6 @@ contract LendingPool {
     error SelfLiquidation();
     error BadDebt();
     error HealthFactorTooLow();
-    error InvalidStalenessWindow();
 
     event Deposited(address indexed user, uint256 amount, uint256 shares);
     event Withdrawn(address indexed user, uint256 amount, uint256 shares);
@@ -51,6 +58,7 @@ contract LendingPool {
     event LiquidityWithdrawn(address indexed user, uint256 amount);
     event Borrowed(address indexed user, uint256 amount, uint256 newDebt);
     event Repaid(address indexed user, uint256 amount, uint256 newDebt);
+    event BorrowIndexUpdated(uint256 newBorrowIndex);
 
     event Liquidated(
         address indexed liquidator,
@@ -67,7 +75,9 @@ contract LendingPool {
         uint256 maxPriceStaleness_,
         uint256 ltvBps_,
         uint256 liquidationThresholdBps_,
-        uint256 liquidationBonusBps_
+        uint256 liquidationBonusBps_,
+        uint256 baseBorrowRate_,
+        uint256 borrowRateSlope_
     ) {
         if (priceFeed_ == address(0) || vault_ == address(0) || debtAsset_ == address(0)) {
             revert ZeroAddress();
@@ -84,6 +94,10 @@ contract LendingPool {
             revert InvalidRiskParameters();
         }
 
+        if (baseBorrowRate_ + borrowRateSlope_ > WAD) {
+            revert InvalidInterestRateModel();
+        }
+
         priceFeed = IPriceFeed(priceFeed_);
         vault = CollateralVault(vault_);
         collateralAsset = IERC20(vault.asset());
@@ -93,6 +107,54 @@ contract LendingPool {
         ltvBps = ltvBps_;
         liquidationThresholdBps = liquidationThresholdBps_;
         liquidationBonusBps = liquidationBonusBps_;
+        borrowIndex = WAD;
+        lastBorrowIndexUpdate = block.timestamp;
+        baseBorrowRate = baseBorrowRate_;
+        borrowRateSlope = borrowRateSlope_;
+    }
+
+    function debtBalanceOf(address user) public view returns (uint256) {
+        return scaledDebtOf[user] * currentBorrowIndex() / WAD;
+    }
+
+    function totalDebt() public view returns (uint256) {
+        return totalScaledDebt * currentBorrowIndex() / WAD;
+    }
+
+    function currentBorrowIndex() public view returns (uint256) {
+        uint256 timeElapsed = block.timestamp - lastBorrowIndexUpdate;
+
+        if (timeElapsed == 0) {
+            return borrowIndex;
+        }
+
+        if (totalScaledDebt == 0) {
+            return borrowIndex;
+        }
+
+        uint256 rate = currentBorrowRate();
+        uint256 interestFactor = rate * timeElapsed / SECONDS_PER_YEAR;
+        uint256 secondOrderTerm = interestFactor * interestFactor / (2 * WAD);
+
+        return borrowIndex * (WAD + interestFactor + secondOrderTerm) / WAD;
+    }
+
+    function utilizationRate() public view returns (uint256) {
+        if (totalLiquidity == 0) return 0;
+
+        uint256 debt = _storedTotalDebt();
+
+        if (debt >= totalLiquidity) {
+            return WAD;
+        }
+
+        return debt * WAD / totalLiquidity;
+    }
+
+    function currentBorrowRate() public view returns (uint256) {
+        uint256 utilization = utilizationRate();
+
+        return baseBorrowRate + utilization * borrowRateSlope / WAD;
     }
 
     function depositCollateral(uint256 amount) external {
@@ -118,7 +180,7 @@ contract LendingPool {
         if (collateral < sharesNeeded) revert InsufficientCollateral();
 
         uint256 remainingCollateralAssets = getCollateralAssets(msg.sender) - amount;
-        uint256 debt = debtBalanceOf[msg.sender];
+        uint256 debt = debtBalanceOf(msg.sender);
 
         if (debt != 0) {
             uint256 priceWad = OracleLib.getFreshPriceWad(priceFeed, maxPriceStaleness);
@@ -141,7 +203,10 @@ contract LendingPool {
 
     function depositLiquidity(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
-
+        // NOTE: The borrow index is not updated here intentionally.
+        // Interest accrues on the next debt-mutating action: borrow, repay, or liquidate.
+        // A large liquidity deposit between accruals may slightly undercharge borrowers
+        // for the previous period because utilization is recalculated with the new liquidity.
         debtAsset.safeTransferFrom(msg.sender, address(this), amount);
 
         liquidityBalanceOf[msg.sender] += amount;
@@ -168,24 +233,34 @@ contract LendingPool {
     }
 
     function availableLiquidity() public view returns (uint256) {
-        return totalLiquidity - totalDebt;
+        uint256 debt = totalDebt();
+
+        if (debt >= totalLiquidity) {
+            return 0;
+        }
+
+        return totalLiquidity - debt;
     }
 
     function borrow(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
 
+        _updateBorrowIndex();
+
         if (collateralSharesOf[msg.sender] == 0) revert InsufficientCollateral();
 
         uint256 maxBorrow = maxBorrowOf(msg.sender);
-        uint256 newDebt = debtBalanceOf[msg.sender] + amount;
+        uint256 newDebt = debtBalanceOf(msg.sender) + amount;
 
         if (newDebt > maxBorrow) revert BorrowExceedsLimit();
 
         uint256 available = availableLiquidity();
         if (amount > available) revert InsufficientLiquidity();
 
-        debtBalanceOf[msg.sender] = newDebt;
-        totalDebt += amount;
+        uint256 scaledAmount = amount * WAD / borrowIndex;
+
+        scaledDebtOf[msg.sender] += scaledAmount;
+        totalScaledDebt += scaledAmount;
 
         debtAsset.safeTransfer(msg.sender, amount);
 
@@ -195,14 +270,24 @@ contract LendingPool {
     function repay(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
 
-        uint256 debt = debtBalanceOf[msg.sender];
+        _updateBorrowIndex();
+
+        uint256 debt = debtBalanceOf(msg.sender);
         if (debt == 0) revert NoDebt();
 
         uint256 repayAmount = amount > debt ? debt : amount;
         uint256 newDebt = debt - repayAmount;
+        uint256 userScaledDebt = scaledDebtOf[msg.sender];
 
-        debtBalanceOf[msg.sender] = newDebt;
-        totalDebt -= repayAmount;
+        if (repayAmount == debt) {
+            scaledDebtOf[msg.sender] = 0;
+            totalScaledDebt -= userScaledDebt;
+        } else {
+            uint256 scaledRepayAmount = repayAmount * WAD / borrowIndex;
+
+            scaledDebtOf[msg.sender] -= scaledRepayAmount;
+            totalScaledDebt -= scaledRepayAmount;
+        }
 
         debtAsset.safeTransferFrom(msg.sender, address(this), repayAmount);
 
@@ -214,7 +299,9 @@ contract LendingPool {
         if (msg.sender == borrower) revert SelfLiquidation();
         if (repayAmount == 0) revert ZeroAmount();
 
-        uint256 debt = debtBalanceOf[borrower];
+        _updateBorrowIndex();
+
+        uint256 debt = debtBalanceOf(borrower);
         if (debt == 0) revert NoDebt();
 
         uint256 priceWad = OracleLib.getFreshPriceWad(priceFeed, maxPriceStaleness);
@@ -246,8 +333,17 @@ contract LendingPool {
 
         uint256 seizedShares = vault.previewWithdraw(collateralToSeizeAssets);
 
-        debtBalanceOf[borrower] -= actualRepay;
-        totalDebt -= actualRepay;
+        uint256 borrowerScaledDebt = scaledDebtOf[borrower];
+
+        if (actualRepay == debt) {
+            scaledDebtOf[borrower] = 0;
+            totalScaledDebt -= borrowerScaledDebt;
+        } else {
+            uint256 scaledRepayAmount = actualRepay * WAD / borrowIndex;
+
+            scaledDebtOf[borrower] -= scaledRepayAmount;
+            totalScaledDebt -= scaledRepayAmount;
+        }
 
         collateralSharesOf[borrower] -= seizedShares;
         totalCollateralShares -= seizedShares;
@@ -276,13 +372,13 @@ contract LendingPool {
 
     function getHealthFactor(address user) public view returns (uint256) {
         uint256 collateralValue = getCollateralValue(user);
-        uint256 debt = debtBalanceOf[user];
+        uint256 debt = debtBalanceOf(user);
 
         return _healthFactor(collateralValue, debt);
     }
 
     function isLiquidatable(address user) public view returns (bool) {
-        uint256 debt = debtBalanceOf[user];
+        uint256 debt = debtBalanceOf(user);
 
         if (debt == 0) return false;
 
@@ -299,5 +395,20 @@ contract LendingPool {
 
     function _collateralAssetsForDebtValue(uint256 debtValue, uint256 priceWad) internal pure returns (uint256) {
         return debtValue * WAD / priceWad;
+    }
+
+    function _updateBorrowIndex() internal {
+        uint256 newIndex = currentBorrowIndex();
+
+        if (newIndex != borrowIndex) {
+            borrowIndex = newIndex;
+            emit BorrowIndexUpdated(newIndex);
+        }
+
+        lastBorrowIndexUpdate = block.timestamp;
+    }
+
+    function _storedTotalDebt() internal view returns (uint256) {
+        return totalScaledDebt * borrowIndex / WAD;
     }
 }
