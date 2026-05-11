@@ -1,0 +1,356 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+
+import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
+
+import {CollateralVault} from "../../src/core/vault/CollateralVault.sol";
+import {LendingPool} from "../../src/core/lending/LendingPool.sol";
+
+contract LendingPoolFuzzTest is Test {
+    MockERC20 internal asset;
+    CollateralVault internal vault;
+    LendingPool internal pool;
+    MockV3Aggregator internal priceFeed;
+
+    address internal user;
+    address internal lp;
+    address internal liquidator;
+
+    uint256 internal constant WAD = 1e18;
+    uint256 internal constant BPS = 10_000;
+
+    uint256 internal constant LTV_BPS = 7_000;
+    uint256 internal constant LIQUIDATION_THRESHOLD_BPS = 8_000;
+    uint256 internal constant LIQUIDATION_BONUS_BPS = 500;
+    uint256 internal constant MAX_PRICE_STALENESS = 1 days;
+
+    uint256 internal constant BASE_BORROW_RATE = 0.05e18;
+    uint256 internal constant BORROW_RATE_SLOPE = 0.2e18;
+
+    uint8 internal constant PRICE_DECIMALS = 8;
+    int256 internal constant INITIAL_PRICE = 1e8;
+
+    function setUp() public {
+        user = makeAddr("user");
+        lp = makeAddr("lp");
+        liquidator = makeAddr("liquidator");
+
+        asset = new MockERC20("Asset Token", "ASS");
+        vault = new CollateralVault("Vault Share", "VSS", asset);
+        priceFeed = new MockV3Aggregator(PRICE_DECIMALS, INITIAL_PRICE, block.timestamp);
+
+        pool = new LendingPool(
+            address(priceFeed),
+            address(vault),
+            address(asset),
+            MAX_PRICE_STALENESS,
+            LTV_BPS,
+            LIQUIDATION_THRESHOLD_BPS,
+            LIQUIDATION_BONUS_BPS,
+            BASE_BORROW_RATE,
+            BORROW_RATE_SLOPE
+        );
+
+        asset.mint(user, 1_000 ether);
+        asset.mint(lp, 1_000 ether);
+        asset.mint(liquidator, 1_000 ether);
+
+        vm.prank(user);
+        asset.approve(address(pool), type(uint256).max);
+
+        vm.prank(lp);
+        asset.approve(address(pool), type(uint256).max);
+
+        vm.prank(liquidator);
+        asset.approve(address(pool), type(uint256).max);
+    }
+
+    function test_SetUp() public view {
+        assertEq(asset.balanceOf(user), 1_000 ether);
+        assertEq(asset.balanceOf(lp), 1_000 ether);
+        assertEq(asset.balanceOf(liquidator), 1_000 ether);
+        assertEq(pool.borrowIndex(), WAD);
+    }
+
+    function testFuzz_Borrow_UpdatesAccountingCorrectly(uint256 borrowAmount) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        uint256 maxBorrow = pool.maxBorrowOf(user);
+        borrowAmount = bound(borrowAmount, 1, maxBorrow);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        assertEq(pool.debtBalanceOf(user), borrowAmount);
+        assertEq(pool.totalDebt(), borrowAmount);
+        assertEq(pool.availableLiquidity(), liquidityAmount - borrowAmount);
+        assertEq(asset.balanceOf(user), userBalanceBefore + borrowAmount);
+    }
+
+    function testFuzz_Borrow_RevertsIfExceedsMaxBorrow(uint256 borrowAmount) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        uint256 maxBorrow = pool.maxBorrowOf(user);
+        borrowAmount = bound(borrowAmount, maxBorrow + 1, liquidityAmount);
+
+        vm.prank(user);
+        vm.expectRevert(LendingPool.BorrowExceedsLimit.selector);
+        pool.borrow(borrowAmount);
+    }
+
+    function testFuzz_Repay_ReducesDebtCorrectly(uint256 borrowAmount, uint256 repayAmount) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        uint256 maxBorrow = pool.maxBorrowOf(user);
+        borrowAmount = bound(borrowAmount, 1, maxBorrow);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        repayAmount = bound(repayAmount, 1, borrowAmount);
+
+        vm.prank(user);
+        pool.repay(repayAmount);
+
+        uint256 expectedDebt = borrowAmount - repayAmount;
+
+        assertEq(pool.debtBalanceOf(user), expectedDebt);
+        assertEq(pool.totalDebt(), expectedDebt);
+        assertEq(pool.availableLiquidity(), liquidityAmount - expectedDebt);
+
+        if (repayAmount == borrowAmount) {
+            assertEq(pool.scaledDebtOf(user), 0);
+            assertEq(pool.totalScaledDebt(), 0);
+        } else {
+            assertGt(pool.scaledDebtOf(user), 0);
+            assertGt(pool.totalScaledDebt(), 0);
+        }
+    }
+
+    function testFuzz_Repay_OverpayOnlyRepaysOutstandingDebt(uint256 borrowAmount, uint256 repayAmount) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        uint256 maxBorrow = pool.maxBorrowOf(user);
+
+        borrowAmount = bound(borrowAmount, 1, maxBorrow);
+        repayAmount = bound(repayAmount, borrowAmount + 1, type(uint128).max);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+
+        vm.prank(user);
+        pool.repay(repayAmount);
+
+        assertEq(pool.debtBalanceOf(user), 0);
+        assertEq(pool.totalDebt(), 0);
+        assertEq(pool.scaledDebtOf(user), 0);
+        assertEq(pool.totalScaledDebt(), 0);
+        assertEq(pool.availableLiquidity(), liquidityAmount);
+        assertEq(asset.balanceOf(user), userBalanceBefore - borrowAmount);
+    }
+
+    function testFuzz_RepayAfterAccrual_ReducesDebtButDoesNotUnderflow(
+        uint256 borrowAmount,
+        uint256 repayAmount,
+        uint256 timeElapsed
+    ) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        uint256 maxBorrow = pool.maxBorrowOf(user);
+        borrowAmount = bound(borrowAmount, 1 ether, maxBorrow);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        timeElapsed = bound(timeElapsed, 1, MAX_PRICE_STALENESS - 1);
+
+        vm.warp(block.timestamp + timeElapsed);
+        priceFeed.setUpdatedAt(block.timestamp);
+
+        uint256 debtBefore = pool.debtBalanceOf(user);
+        uint256 scaledDebtBefore = pool.scaledDebtOf(user);
+
+        assertGt(debtBefore, borrowAmount);
+
+        repayAmount = bound(repayAmount, 1, debtBefore);
+
+        vm.prank(user);
+        pool.repay(repayAmount);
+
+        uint256 debtAfter = pool.debtBalanceOf(user);
+
+        assertLe(debtAfter, debtBefore);
+        assertLe(pool.scaledDebtOf(user), scaledDebtBefore);
+        assertEq(pool.totalDebt(), debtAfter);
+        assertEq(pool.availableLiquidity(), liquidityAmount - debtAfter);
+
+        if (repayAmount == debtBefore) {
+            assertEq(pool.scaledDebtOf(user), 0);
+            assertEq(pool.totalScaledDebt(), 0);
+        } else {
+            assertGt(pool.scaledDebtOf(user), 0);
+            assertGt(pool.totalScaledDebt(), 0);
+        }
+    }
+
+    function testFuzz_Liquidate_ReducesDebtAndCollateral(uint256 repayAmount) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+        uint256 borrowAmount = 70 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        priceFeed.setAnswer(5e7);
+
+        uint256 debtBefore = pool.debtBalanceOf(user);
+        uint256 collateralBefore = pool.collateralSharesOf(user);
+
+        repayAmount = bound(repayAmount, 1, debtBefore);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        uint256 debtAfter = pool.debtBalanceOf(user);
+        uint256 collateralAfter = pool.collateralSharesOf(user);
+
+        assertLt(debtAfter, debtBefore);
+        assertLt(collateralAfter, collateralBefore);
+        assertEq(pool.totalDebt(), debtAfter);
+        assertEq(pool.availableLiquidity(), liquidityAmount - debtAfter);
+    }
+
+    function testFuzz_Liquidate_RevertsIfPositionIsHealthy(uint256 repayAmount) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+        uint256 borrowAmount = 50 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        repayAmount = bound(repayAmount, 1, borrowAmount);
+
+        vm.prank(liquidator);
+        vm.expectRevert(LendingPool.PositionNotLiquidatable.selector);
+        pool.liquidate(user, repayAmount);
+    }
+
+    function testFuzz_Liquidate_CapsRepayWhenCollateralCannotCoverDebtPlusBonus(uint256 repayAmount) public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+        uint256 borrowAmount = 70 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        priceFeed.setAnswer(5e7);
+
+        uint256 debtBefore = pool.debtBalanceOf(user);
+
+        // priceFeed answer is 5e7 with 8 decimals = 0.5 WAD,
+        // so collateral value is exactly half of collateralAmount.
+        uint256 collateralValue = collateralAmount / 2;
+
+        uint256 maxRepayCoveredByCollateral = collateralValue * BPS / (BPS + LIQUIDATION_BONUS_BPS);
+
+        repayAmount = bound(repayAmount, maxRepayCoveredByCollateral + 1, debtBefore);
+
+        vm.prank(liquidator);
+        pool.liquidate(user, repayAmount);
+
+        assertGt(pool.debtBalanceOf(user), 0);
+        assertLt(pool.debtBalanceOf(user), debtBefore);
+        assertEq(pool.collateralSharesOf(user), 0);
+        assertEq(pool.totalCollateralShares(), 0);
+    }
+
+    function testFuzz_BorrowAndRepay_AvailableLiquidityRemainsConsistent(uint256 borrowAmount, uint256 repayAmount)
+        public
+    {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        uint256 maxBorrow = pool.maxBorrowOf(user);
+        borrowAmount = bound(borrowAmount, 1, maxBorrow);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        repayAmount = bound(repayAmount, 1, borrowAmount);
+
+        vm.prank(user);
+        pool.repay(repayAmount);
+
+        uint256 remainingDebt = borrowAmount - repayAmount;
+
+        assertEq(pool.totalDebt(), remainingDebt);
+        assertEq(pool.availableLiquidity(), liquidityAmount - remainingDebt);
+        assertLe(pool.availableLiquidity(), pool.totalLiquidity());
+    }
+}

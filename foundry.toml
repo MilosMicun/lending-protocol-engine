@@ -9,3 +9,7 @@ ignored_warnings_from = ["lib/"]
 
 [profile.default.fmt]
 line_length = 120
+
+[invariant]
+runs = 64
+depth = 128
