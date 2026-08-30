@@ -103,7 +103,7 @@ contract LendingPoolUpgradeStatePreservationTest is Test, LendingPoolProxyFixtur
     CollateralVault internal vault;
     LendingPool internal pool;
     LendingPool internal v1Implementation;
-    LendingPoolV1_1 internal v1_1Implementation;
+    LendingPoolV1_1 internal v11Implementation;
 
     address internal activeAuthority;
     address internal pendingAuthority;
@@ -122,7 +122,7 @@ contract LendingPoolUpgradeStatePreservationTest is Test, LendingPoolProxyFixtur
         assertEq(beforeState.implementationWord, _addressWord(address(v1Implementation)));
 
         vm.prank(activeAuthority);
-        pool.upgradeToAndCall(address(v1_1Implementation), "");
+        pool.upgradeToAndCall(address(v11Implementation), "");
 
         _assertImmediateUpgradePreservation(beforeState);
         _provePostUpgradeFlows();
@@ -142,7 +142,7 @@ contract LendingPoolUpgradeStatePreservationTest is Test, LendingPoolProxyFixtur
         priceFeed = new MockV3Aggregator(8, 1e8, block.timestamp);
         vault = new CollateralVault("Collateral Vault Share", "CVS", collateralToken);
         v1Implementation = new LendingPool();
-        v1_1Implementation = new LendingPoolV1_1();
+        v11Implementation = new LendingPoolV1_1();
 
         pool = _deployLendingPoolProxy(v1Implementation, _proxyConfig());
 
@@ -330,7 +330,7 @@ contract LendingPoolUpgradeStatePreservationTest is Test, LendingPoolProxyFixtur
         assertEq(address(pool), beforeState.proxyAddress);
         assertEq(block.timestamp, beforeState.timestamp);
         assertEq(beforeState.implementationWord, _addressWord(address(v1Implementation)));
-        assertEq(vm.load(address(pool), ERC1967_IMPLEMENTATION_SLOT), _addressWord(address(v1_1Implementation)));
+        assertEq(vm.load(address(pool), ERC1967_IMPLEMENTATION_SLOT), _addressWord(address(v11Implementation)));
         assertEq(LendingPoolV1_1(address(pool)).version(), "1.1");
 
         for (uint256 slot; slot < beforeState.legacySlots.length; ++slot) {
@@ -524,7 +524,7 @@ contract LendingPoolUpgradeStatePreservationTest is Test, LendingPoolProxyFixtur
 
     function _assertImplementationsCustodyFree() internal view {
         _assertImplementationCustodyFree(address(v1Implementation));
-        _assertImplementationCustodyFree(address(v1_1Implementation));
+        _assertImplementationCustodyFree(address(v11Implementation));
     }
 
     function _assertImplementationCustodyFree(address implementation) internal view {

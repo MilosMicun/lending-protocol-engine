@@ -87,7 +87,7 @@ contract UpgradeLendingPoolV1_1 is Script {
     error UnexpectedActiveUpgradeAuthority(address expectedAuthority, address actualAuthority);
     error UnexpectedPendingUpgradeAuthority(address expectedAuthority, address actualAuthority);
     error ProxiableUUIDReadFailed(address implementation);
-    error UnexpectedProxiableUUID(address implementation, bytes32 actualUUID);
+    error UnexpectedProxiableUUID(address implementation, bytes32 actualUuid);
     error LendingPoolProxyInterfaceReadFailed(address lendingPoolProxy, bytes4 selector);
     error SnapshotReadFailed(address target, bytes4 selector);
     error NewImplementationHasNoCode(address implementation);
@@ -111,7 +111,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         UpgradeSnapshot memory beforeUpgrade = snapshot(config.lendingPoolProxy);
 
         vm.startBroadcast(config.expectedUpgradeAuthority);
-        newImplementation = deployV1_1(config);
+        newImplementation = deployV11(config);
         bytes memory callData = encodeUpgradeCall(address(newImplementation));
         _executeUpgrade(config.lendingPoolProxy, callData);
         vm.stopBroadcast();
@@ -151,7 +151,7 @@ contract UpgradeLendingPoolV1_1 is Script {
             revert UnexpectedCurrentImplementation(expectedImplementationWord, implementationWord);
         }
 
-        _validateProxiableUUID(config.expectedCurrentImplementation);
+        _validateProxiableUuid(config.expectedCurrentImplementation);
 
         address activeAuthority = _readProxyAddress(config.lendingPoolProxy, LendingPool.upgradeAuthority.selector);
         if (activeAuthority != config.expectedUpgradeAuthority) {
@@ -183,7 +183,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         state.custody = _snapshotCustody(lendingPoolProxy, state.configuration);
     }
 
-    function deployV1_1(UpgradeConfig memory config) public returns (LendingPoolV1_1 newImplementation) {
+    function deployV11(UpgradeConfig memory config) public returns (LendingPoolV1_1 newImplementation) {
         newImplementation = new LendingPoolV1_1();
         address implementation = address(newImplementation);
 
@@ -197,7 +197,7 @@ contract UpgradeLendingPoolV1_1 is Script {
             revert NewImplementationMatchesCurrentImplementation(implementation);
         }
 
-        _validateProxiableUUID(implementation);
+        _validateProxiableUuid(implementation);
     }
 
     function encodeUpgradeCall(address newImplementation) public pure returns (bytes memory) {
@@ -337,7 +337,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         }
     }
 
-    function _validateProxiableUUID(address implementation) internal view {
+    function _validateProxiableUuid(address implementation) internal view {
         (bool success, bytes memory returnData) =
             implementation.staticcall(abi.encodeCall(IERC1822Proxiable.proxiableUUID, ()));
         if (!success || returnData.length != 32) {
@@ -350,7 +350,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         }
     }
 
-    function _validateVersion(address proxy) internal view {
+    function _validateVersion(address proxy) internal pure {
         try LendingPoolV1_1(proxy).version() returns (string memory actualVersion) {
             if (keccak256(bytes(actualVersion)) != keccak256(bytes("1.1"))) {
                 revert UnexpectedVersion(actualVersion);
@@ -377,6 +377,8 @@ contract UpgradeLendingPoolV1_1 is Script {
         if (value > type(uint160).max) {
             revert LendingPoolProxyInterfaceReadFailed(proxy, selector);
         }
+        // The preceding upper-bound check proves this conversion cannot truncate non-zero upper bits.
+        // forge-lint: disable-next-line(unsafe-typecast)
         return address(uint160(value));
     }
 

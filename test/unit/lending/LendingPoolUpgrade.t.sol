@@ -55,7 +55,7 @@ contract LendingPoolUpgradeTest is Test, LendingPoolProxyFixture {
     CollateralVault internal vault;
     LendingPool internal pool;
     LendingPool internal v1Implementation;
-    LendingPoolV1_1 internal v1_1Implementation;
+    LendingPoolV1_1 internal v11Implementation;
 
     address internal proxyDeployer;
     address internal formerAuthority;
@@ -78,7 +78,7 @@ contract LendingPoolUpgradeTest is Test, LendingPoolProxyFixture {
         priceFeed = new MockV3Aggregator(8, 1e8, block.timestamp);
 
         v1Implementation = new LendingPool();
-        v1_1Implementation = new LendingPoolV1_1();
+        v11Implementation = new LendingPoolV1_1();
         pool = _deployLendingPoolProxy(v1Implementation, _proxyConfig(formerAuthority));
 
         vm.prank(formerAuthority);
@@ -95,30 +95,30 @@ contract LendingPoolUpgradeTest is Test, LendingPoolProxyFixture {
 
         assertEq(beforeState.implementation, address(v1Implementation));
         assertNotEq(proxyAddress, address(v1Implementation));
-        assertNotEq(proxyAddress, address(v1_1Implementation));
-        assertNotEq(address(v1Implementation), address(v1_1Implementation));
+        assertNotEq(proxyAddress, address(v11Implementation));
+        assertNotEq(address(v1Implementation), address(v11Implementation));
         assertNotEq(proxyDeployer, activeAuthority);
         assertNotEq(activeAuthority, pendingAuthority);
         assertNotEq(activeAuthority, formerAuthority);
         assertNotEq(activeAuthority, unrelatedCaller);
 
         vm.prank(activeAuthority);
-        pool.upgradeToAndCall(address(v1_1Implementation), "");
+        pool.upgradeToAndCall(address(v11Implementation), "");
 
         assertEq(address(pool), proxyAddress);
-        assertEq(_implementationAddress(), address(v1_1Implementation));
+        assertEq(_implementationAddress(), address(v11Implementation));
         assertEq(LendingPoolV1_1(proxyAddress).version(), "1.1");
         _assertProxyStateUnchanged(beforeState);
     }
 
     function test_SuccessfulUpgradeEmitsStandardERC1967UpgradedEvent() public {
         vm.expectEmit(true, false, false, true, address(pool));
-        emit Upgraded(address(v1_1Implementation));
+        emit Upgraded(address(v11Implementation));
 
         vm.prank(activeAuthority);
-        pool.upgradeToAndCall(address(v1_1Implementation), "");
+        pool.upgradeToAndCall(address(v11Implementation), "");
 
-        assertEq(_implementationAddress(), address(v1_1Implementation));
+        assertEq(_implementationAddress(), address(v11Implementation));
     }
 
     function test_UnrelatedCallerCannotUpgradeAndFailedAttemptPreservesProxyState() public {
@@ -142,18 +142,18 @@ contract LendingPoolUpgradeTest is Test, LendingPoolProxyFixture {
         _expectUnauthorizedUpgradeAndUnchanged(formerAuthority);
 
         vm.prank(activeAuthority);
-        pool.upgradeToAndCall(address(v1_1Implementation), "");
+        pool.upgradeToAndCall(address(v11Implementation), "");
 
-        assertEq(_implementationAddress(), address(v1_1Implementation));
+        assertEq(_implementationAddress(), address(v11Implementation));
         assertEq(LendingPoolV1_1(address(pool)).version(), "1.1");
     }
 
     function test_DirectUpgradeCallsOnV1AndV1_1ImplementationsFailProxyContextGuard() public {
         vm.expectRevert(UUPSUpgradeable.UUPSUnauthorizedCallContext.selector);
-        v1Implementation.upgradeToAndCall(address(v1_1Implementation), "");
+        v1Implementation.upgradeToAndCall(address(v11Implementation), "");
 
         vm.expectRevert(UUPSUpgradeable.UUPSUnauthorizedCallContext.selector);
-        v1_1Implementation.upgradeToAndCall(address(v1Implementation), "");
+        v11Implementation.upgradeToAndCall(address(v1Implementation), "");
     }
 
     function test_ProxiableUUIDThroughProxyFailsDelegateCallContextGuard() public {
@@ -163,7 +163,7 @@ contract LendingPoolUpgradeTest is Test, LendingPoolProxyFixture {
 
     function test_DirectProxiableUUIDOnV1AndV1_1ReturnsERC1967ImplementationSlot() public view {
         assertEq(v1Implementation.proxiableUUID(), ERC1967_IMPLEMENTATION_SLOT);
-        assertEq(v1_1Implementation.proxiableUUID(), ERC1967_IMPLEMENTATION_SLOT);
+        assertEq(v11Implementation.proxiableUUID(), ERC1967_IMPLEMENTATION_SLOT);
     }
 
     function test_UpgradeToZeroAddressRevertsAndPreservesProxyState() public {
@@ -176,19 +176,19 @@ contract LendingPoolUpgradeTest is Test, LendingPoolProxyFixture {
     }
 
     function test_UpgradeToNonUUPSImplementationRevertsAndPreservesProxyState() public {
-        NonUUPSImplementation nonUUPSImplementation = new NonUUPSImplementation();
+        NonUUPSImplementation nonUupsImplementation = new NonUUPSImplementation();
 
-        assertGt(address(nonUUPSImplementation).code.length, 0);
-        _expectInvalidImplementationAndUnchanged(address(nonUUPSImplementation));
+        assertGt(address(nonUupsImplementation).code.length, 0);
+        _expectInvalidImplementationAndUnchanged(address(nonUupsImplementation));
     }
 
     function test_UpgradeToWrongUUIDImplementationRevertsAndPreservesProxyState() public {
-        WrongUUIDImplementation wrongUUIDImplementation = new WrongUUIDImplementation();
+        WrongUUIDImplementation wrongUuidImplementation = new WrongUUIDImplementation();
         ProxyStateSnapshot memory beforeState = _snapshotProxyState();
 
         vm.prank(activeAuthority);
         vm.expectRevert(abi.encodeWithSelector(UUPSUpgradeable.UUPSUnsupportedProxiableUUID.selector, WRONG_UUID));
-        pool.upgradeToAndCall(address(wrongUUIDImplementation), "");
+        pool.upgradeToAndCall(address(wrongUuidImplementation), "");
 
         _assertProxyStateExactly(beforeState);
     }
@@ -210,7 +210,7 @@ contract LendingPoolUpgradeTest is Test, LendingPoolProxyFixture {
 
         vm.prank(caller);
         vm.expectRevert(abi.encodeWithSelector(LendingPool.UnauthorizedUpgradeAuthority.selector, caller));
-        pool.upgradeToAndCall(address(v1_1Implementation), "");
+        pool.upgradeToAndCall(address(v11Implementation), "");
 
         _assertProxyStateExactly(beforeState);
     }

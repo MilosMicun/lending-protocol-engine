@@ -69,7 +69,7 @@ contract UpgradeLendingPoolV1_1Test is Test {
         UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforeUpgrade = upgrader.snapshot(address(pool));
 
         uint64 nonceBefore = vm.getNonce(address(upgrader));
-        LendingPoolV1_1 newImplementation = upgrader.deployV1_1(config);
+        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
         assertEq(vm.getNonce(address(upgrader)), nonceBefore + 1);
         assertGt(address(newImplementation).code.length, 0);
         assertNotEq(address(newImplementation), address(pool));
@@ -111,7 +111,7 @@ contract UpgradeLendingPoolV1_1Test is Test {
         assertGt(beforeUpgrade.custody.vaultTotalSupply, 0);
         assertGt(beforeUpgrade.custody.vaultCollateralAssetBalance, 0);
 
-        LendingPoolV1_1 newImplementation = upgrader.deployV1_1(config);
+        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
         bytes memory upgradeCall = upgrader.encodeUpgradeCall(address(newImplementation));
 
         vm.prank(activeAuthority);
@@ -175,13 +175,13 @@ contract UpgradeLendingPoolV1_1Test is Test {
             )
         );
 
-        WrongUUIDImplementation wrongUUIDImplementation = new WrongUUIDImplementation();
-        ERC1967Proxy wrongUUIDProxy = new ERC1967Proxy(
-            address(wrongUUIDImplementation), abi.encodeCall(WrongUUIDImplementation.proxiableUUID, ())
+        WrongUUIDImplementation wrongUuidImplementation = new WrongUUIDImplementation();
+        ERC1967Proxy wrongUuidProxy = new ERC1967Proxy(
+            address(wrongUuidImplementation), abi.encodeCall(WrongUUIDImplementation.proxiableUUID, ())
         );
         config = UpgradeLendingPoolV1_1.UpgradeConfig({
-            lendingPoolProxy: address(wrongUUIDProxy),
-            expectedCurrentImplementation: address(wrongUUIDImplementation),
+            lendingPoolProxy: address(wrongUuidProxy),
+            expectedCurrentImplementation: address(wrongUuidImplementation),
             expectedUpgradeAuthority: activeAuthority,
             expectedPendingUpgradeAuthority: address(0),
             expectedChainId: block.chainid
@@ -190,7 +190,7 @@ contract UpgradeLendingPoolV1_1Test is Test {
             config,
             abi.encodeWithSelector(
                 UpgradeLendingPoolV1_1.UnexpectedProxiableUUID.selector,
-                address(wrongUUIDImplementation),
+                address(wrongUuidImplementation),
                 bytes32(uint256(1))
             )
         );
@@ -238,7 +238,7 @@ contract UpgradeLendingPoolV1_1Test is Test {
         UpgradeLendingPoolV1_1.UpgradeConfig memory config = _upgradeConfig(address(0));
         upgrader.validatePreUpgrade(config);
         UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforeUpgrade = upgrader.snapshot(address(pool));
-        LendingPoolV1_1 newImplementation = upgrader.deployV1_1(config);
+        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
         bytes memory upgradeCall = upgrader.encodeUpgradeCall(address(newImplementation));
 
         vm.prank(nonAuthority);
