@@ -21,8 +21,8 @@ contract LendingPoolHandler is Test {
 
     uint256 public successfulBorrows;
 
-    constructor(LendingPool pool_, MockERC20 asset_, MockV3Aggregator priceFeed_, address[] memory users_) {
-        pool = pool_;
+    constructor(LendingPool poolProxy_, MockERC20 asset_, MockV3Aggregator priceFeed_, address[] memory users_) {
+        pool = poolProxy_;
         asset = asset_;
         priceFeed = priceFeed_;
 

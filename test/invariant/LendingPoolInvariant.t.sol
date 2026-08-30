@@ -5,15 +5,17 @@ import {Test} from "forge-std/Test.sol";
 
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
+import {LendingPoolProxyFixture} from "../helpers/LendingPoolProxyFixture.sol";
 
 import {CollateralVault} from "../../src/core/vault/CollateralVault.sol";
 import {LendingPool} from "../../src/core/lending/LendingPool.sol";
 import {LendingPoolHandler} from "./LendingPoolHandler.t.sol";
 
-contract LendingPoolInvariantTest is Test {
+contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
     MockERC20 internal asset;
     CollateralVault internal vault;
     LendingPool internal pool;
+    LendingPool internal poolImplementation;
     MockV3Aggregator internal priceFeed;
     LendingPoolHandler internal handler;
 
@@ -43,17 +45,20 @@ contract LendingPoolInvariantTest is Test {
         vault = new CollateralVault("Vault Share", "VSS", asset);
         priceFeed = new MockV3Aggregator(PRICE_DECIMALS, INITIAL_PRICE, block.timestamp);
 
-        pool = new LendingPool(
-            address(priceFeed),
-            address(vault),
-            address(asset),
-            MAX_PRICE_STALENESS,
-            LTV_BPS,
-            LIQUIDATION_THRESHOLD_BPS,
-            LIQUIDATION_BONUS_BPS,
-            BASE_BORROW_RATE,
-            BORROW_RATE_SLOPE
-        );
+        LendingPoolProxyConfig memory config = LendingPoolProxyConfig({
+            priceFeed: address(priceFeed),
+            vault: address(vault),
+            debtAsset: address(asset),
+            maxPriceStaleness: MAX_PRICE_STALENESS,
+            ltvBps: LTV_BPS,
+            liquidationThresholdBps: LIQUIDATION_THRESHOLD_BPS,
+            liquidationBonusBps: LIQUIDATION_BONUS_BPS,
+            baseBorrowRate: BASE_BORROW_RATE,
+            borrowRateSlope: BORROW_RATE_SLOPE,
+            initialUpgradeAuthority: address(this)
+        });
+
+        (pool, poolImplementation) = _deployLendingPoolProxy(config);
 
         address[] memory users = new address[](3);
         users[0] = user1;

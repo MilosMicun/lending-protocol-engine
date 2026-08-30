@@ -6,12 +6,13 @@ import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockV3Aggregator} from "../../mocks/MockV3Aggregator.sol";
+import {LendingPoolProxyFixture} from "../../helpers/LendingPoolProxyFixture.sol";
 
 import {CollateralVault} from "../../../src/core/vault/CollateralVault.sol";
 import {LendingPool} from "../../../src/core/lending/LendingPool.sol";
 import {OracleLib} from "../../../src/lib/OracleLib.sol";
 
-contract LendingPoolTest is Test {
+contract LendingPoolTest is Test, LendingPoolProxyFixture {
     using stdStorage for StdStorage;
 
     event Repaid(address indexed user, uint256 amount, uint256 newDebt);
@@ -20,6 +21,7 @@ contract LendingPoolTest is Test {
     MockERC20 internal asset;
     CollateralVault internal vault;
     LendingPool internal pool;
+    LendingPool internal poolImplementation;
     MockV3Aggregator internal priceFeed;
 
     address internal user;
@@ -49,17 +51,20 @@ contract LendingPoolTest is Test {
         vault = new CollateralVault("Vault Share", "VSS", asset);
         priceFeed = new MockV3Aggregator(PRICE_DECIMALS, INITIAL_PRICE, block.timestamp);
 
-        pool = new LendingPool(
-            address(priceFeed),
-            address(vault),
-            address(asset),
-            MAX_PRICE_STALENESS,
-            LTV_BPS,
-            LIQUIDATION_THRESHOLD_BPS,
-            LIQUIDATION_BONUS_BPS,
-            BASE_BORROW_RATE,
-            BORROW_RATE_SLOPE
-        );
+        LendingPoolProxyConfig memory config = LendingPoolProxyConfig({
+            priceFeed: address(priceFeed),
+            vault: address(vault),
+            debtAsset: address(asset),
+            maxPriceStaleness: MAX_PRICE_STALENESS,
+            ltvBps: LTV_BPS,
+            liquidationThresholdBps: LIQUIDATION_THRESHOLD_BPS,
+            liquidationBonusBps: LIQUIDATION_BONUS_BPS,
+            baseBorrowRate: BASE_BORROW_RATE,
+            borrowRateSlope: BORROW_RATE_SLOPE,
+            initialUpgradeAuthority: address(this)
+        });
+
+        (pool, poolImplementation) = _deployLendingPoolProxy(config);
 
         asset.mint(user, 1_000 ether);
         asset.mint(lp, 1_000 ether);
@@ -101,26 +106,28 @@ contract LendingPoolTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                            CONSTRUCTOR TESTS
+                           INITIALIZATION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_Constructor_RevertsIfInterestRateModelInvalid() public {
+    function test_Initialization_RevertsIfInterestRateModelInvalid() public {
         uint256 invalidBaseRate = 0.8e18;
         uint256 invalidSlope = 0.3e18;
+        LendingPool invalidImplementation = new LendingPool();
+        LendingPoolProxyConfig memory invalidConfig = LendingPoolProxyConfig({
+            priceFeed: address(priceFeed),
+            vault: address(vault),
+            debtAsset: address(asset),
+            maxPriceStaleness: MAX_PRICE_STALENESS,
+            ltvBps: LTV_BPS,
+            liquidationThresholdBps: LIQUIDATION_THRESHOLD_BPS,
+            liquidationBonusBps: LIQUIDATION_BONUS_BPS,
+            baseBorrowRate: invalidBaseRate,
+            borrowRateSlope: invalidSlope,
+            initialUpgradeAuthority: address(this)
+        });
 
         vm.expectRevert(LendingPool.InvalidInterestRateModel.selector);
-
-        new LendingPool(
-            address(priceFeed),
-            address(vault),
-            address(asset),
-            MAX_PRICE_STALENESS,
-            LTV_BPS,
-            LIQUIDATION_THRESHOLD_BPS,
-            LIQUIDATION_BONUS_BPS,
-            invalidBaseRate,
-            invalidSlope
-        );
+        _deployLendingPoolProxy(invalidImplementation, invalidConfig);
     }
 
     /*//////////////////////////////////////////////////////////////
