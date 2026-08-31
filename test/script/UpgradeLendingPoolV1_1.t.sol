@@ -421,7 +421,8 @@ contract UpgradeLendingPoolV1_1Test is Test {
             liquidationBonusBps: LIQUIDATION_BONUS_BPS,
             baseBorrowRate: BASE_BORROW_RATE,
             borrowRateSlope: BORROW_RATE_SLOPE,
-            initialUpgradeAuthority: activeAuthority
+            initialUpgradeAuthority: activeAuthority,
+            expectedChainId: block.chainid
         });
     }
 

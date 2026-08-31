@@ -13,6 +13,8 @@ import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 import {LendingPool} from "../../src/core/lending/LendingPool.sol";
 import {CollateralVault} from "../../src/core/vault/CollateralVault.sol";
 
+contract IncompatibleDependency {}
+
 contract DeployLendingPoolV1Test is Test {
     bytes32 internal constant ERC1967_IMPLEMENTATION_SLOT =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
@@ -51,6 +53,10 @@ contract DeployLendingPoolV1Test is Test {
 
         (CollateralVault vault, LendingPool implementation, ERC1967Proxy proxy, LendingPool pool) =
             _deployAsBroadcaster(config);
+
+        deployer.validateDeployment(config, vault, implementation, proxy, pool);
+        vm.warp(block.timestamp + 1 days);
+        deployer.validateDeployment(config, vault, implementation, proxy, pool);
 
         assertNotEq(address(vault), address(implementation));
         assertNotEq(address(vault), address(proxy));
@@ -204,6 +210,141 @@ contract DeployLendingPoolV1Test is Test {
         _expectInvalidInterestConfig(config);
     }
 
+    function test_UnexpectedChainIdRevertsBeforeAnyDeployment() public {
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.expectedChainId = block.chainid + 1;
+
+        _expectInvalidConfig(
+            config,
+            abi.encodeWithSelector(
+                DeployLendingPoolV1.UnexpectedChainId.selector, config.expectedChainId, block.chainid
+            )
+        );
+    }
+
+    function test_NonContractDependencyRevertsBeforeAnyDeployment() public {
+        address nonContract = makeAddr("nonContractDependency");
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+
+        config.collateralAsset = nonContract;
+        _expectInvalidConfig(
+            config, abi.encodeWithSelector(DeployLendingPoolV1.CollateralAssetHasNoCode.selector, nonContract)
+        );
+
+        config = _validConfig();
+        config.debtAsset = nonContract;
+        _expectInvalidConfig(
+            config, abi.encodeWithSelector(DeployLendingPoolV1.DebtAssetHasNoCode.selector, nonContract)
+        );
+
+        config = _validConfig();
+        config.priceFeed = nonContract;
+        _expectInvalidConfig(
+            config, abi.encodeWithSelector(DeployLendingPoolV1.PriceFeedHasNoCode.selector, nonContract)
+        );
+    }
+
+    function test_IncompatibleDependencyInterfaceRevertsBeforeAnyDeployment() public {
+        IncompatibleDependency incompatible = new IncompatibleDependency();
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+
+        config.collateralAsset = address(incompatible);
+        _expectInvalidConfig(
+            config,
+            abi.encodeWithSelector(
+                DeployLendingPoolV1.DependencyInterfaceProbeFailed.selector,
+                address(incompatible),
+                bytes4(keccak256("balanceOf(address)"))
+            )
+        );
+
+        config = _validConfig();
+        config.debtAsset = address(incompatible);
+        _expectInvalidConfig(
+            config,
+            abi.encodeWithSelector(
+                DeployLendingPoolV1.DependencyInterfaceProbeFailed.selector,
+                address(incompatible),
+                bytes4(keccak256("balanceOf(address)"))
+            )
+        );
+
+        config = _validConfig();
+        config.priceFeed = address(incompatible);
+        _expectInvalidConfig(
+            config,
+            abi.encodeWithSelector(
+                DeployLendingPoolV1.DependencyInterfaceProbeFailed.selector,
+                address(incompatible),
+                bytes4(keccak256("decimals()"))
+            )
+        );
+    }
+
+    function test_PostDeploymentReadbackRejectsMismatchedArtifacts() public {
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        (CollateralVault vault, LendingPool implementation, ERC1967Proxy proxy, LendingPool pool) =
+            _deployAsBroadcaster(config);
+
+        deployer.validateDeployment(config, vault, implementation, proxy, pool);
+
+        LendingPool incorrectImplementation = new LendingPool();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployLendingPoolV1.UnexpectedProxyImplementation.selector,
+                address(incorrectImplementation),
+                address(implementation)
+            )
+        );
+        deployer.validateDeployment(config, vault, incorrectImplementation, proxy, pool);
+    }
+
+    function test_CounterfactualTokenDustDoesNotBlockCanonicalDeployment() public {
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        uint64 deployerNonce = vm.getNonce(address(deployer));
+        address predictedVault = vm.computeCreateAddress(address(deployer), deployerNonce);
+        address predictedImplementation = vm.computeCreateAddress(address(deployer), deployerNonce + 1);
+        address predictedProxy = vm.computeCreateAddress(address(deployer), deployerNonce + 2);
+
+        uint256 implementationCollateralDust = 11;
+        uint256 implementationDebtDust = 13;
+        uint256 proxyCollateralDust = 17;
+        uint256 proxyDebtDust = 19;
+        collateralToken.mint(address(this), implementationCollateralDust + proxyCollateralDust);
+        debtToken.mint(address(this), implementationDebtDust + proxyDebtDust);
+        assertTrue(collateralToken.transfer(predictedImplementation, implementationCollateralDust));
+        assertTrue(debtToken.transfer(predictedImplementation, implementationDebtDust));
+        assertTrue(collateralToken.transfer(predictedProxy, proxyCollateralDust));
+        assertTrue(debtToken.transfer(predictedProxy, proxyDebtDust));
+
+        (CollateralVault vault, LendingPool implementation, ERC1967Proxy proxy, LendingPool pool) =
+            _deployAsBroadcaster(config);
+
+        assertEq(address(vault), predictedVault);
+        assertEq(address(implementation), predictedImplementation);
+        assertEq(address(proxy), predictedProxy);
+        assertEq(address(pool), predictedProxy);
+        assertEq(_storedAddress(address(proxy), ERC1967_IMPLEMENTATION_SLOT), address(implementation));
+
+        _assertInitializedConfiguration(pool, vault, config, block.timestamp);
+        assertEq(vault.asset(), config.collateralAsset);
+        assertEq(vault.name(), config.collateralVaultName);
+        assertEq(vault.symbol(), config.collateralVaultSymbol);
+        assertEq(pool.totalCollateralShares(), 0);
+        assertEq(pool.totalLiquidity(), 0);
+        assertEq(pool.totalScaledDebt(), 0);
+
+        assertEq(collateralToken.balanceOf(address(implementation)), implementationCollateralDust);
+        assertEq(debtToken.balanceOf(address(implementation)), implementationDebtDust);
+        assertEq(collateralToken.balanceOf(address(proxy)), proxyCollateralDust);
+        assertEq(debtToken.balanceOf(address(proxy)), proxyDebtDust);
+        assertEq(collateralToken.balanceOf(address(vault)), 0);
+        assertEq(vault.balanceOf(address(proxy)), 0);
+        assertEq(vault.balanceOf(address(implementation)), 0);
+
+        deployer.validateDeployment(config, vault, implementation, proxy, pool);
+    }
+
     function _validConfig() internal view returns (DeployLendingPoolV1.DeploymentConfig memory) {
         return DeployLendingPoolV1.DeploymentConfig({
             collateralAsset: address(collateralToken),
@@ -217,7 +358,8 @@ contract DeployLendingPoolV1Test is Test {
             liquidationBonusBps: LIQUIDATION_BONUS_BPS,
             baseBorrowRate: BASE_BORROW_RATE,
             borrowRateSlope: BORROW_RATE_SLOPE,
-            initialUpgradeAuthority: initialUpgradeAuthority
+            initialUpgradeAuthority: initialUpgradeAuthority,
+            expectedChainId: block.chainid
         });
     }
 
