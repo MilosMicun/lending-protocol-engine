@@ -204,6 +204,7 @@ contract VerifyLendingPoolV1_1Upgrade is Script {
         view
         returns (LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot memory custody)
     {
+        custody.proxyCollateralAssetBalance = _readBalance(config.collateralAsset, proxy);
         custody.proxyDebtAssetBalance = _readBalance(config.debtAsset, proxy);
         custody.proxyVaultShareBalance = _readBalance(config.vault, proxy);
         custody.vaultTotalAssets = _readExternalUint(config.vault, abi.encodeWithSignature("totalAssets()"));

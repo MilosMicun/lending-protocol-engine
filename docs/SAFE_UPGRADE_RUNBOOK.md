@@ -190,19 +190,19 @@ Any mismatch invalidates the review. Do not edit decoded arguments manually; dis
 
 Preparation and verification are separate processes on opposite sides of an externally executed Safe transaction. A cross-run fingerprint is therefore required to bind the independently observed post-upgrade state to the state and exact implementation pair recorded during preparation.
 
-The fingerprint is domain-separated and covers:
+The v2 fingerprint is domain-separated and covers:
 
 - chain ID, proxy address, and the expected old and new implementation addresses;
 - the raw values of legacy slots 0 through 17;
 - active and pending upgrade-authority addresses;
 - configuration: price feed, vault, debt asset, collateral asset, maximum price staleness, LTV, liquidation threshold, liquidation bonus, base borrow rate, and borrow-rate slope;
 - accounting totals: borrow index, last index-update timestamp, total collateral shares, total liquidity, and total scaled debt;
-- custody observations: proxy debt-asset balance, proxy vault-share balance, vault total assets, vault total supply, and the vault's collateral-asset balance; and
+- custody observations: direct proxy collateral-asset balance, proxy debt-asset balance, proxy vault-share balance, vault total assets, vault total supply, and the vault's collateral-asset balance; and
 - for both the old and new implementation addresses, collateral-asset balance, debt-asset balance, and vault-share balance.
 
 The proxy's ERC-1967 implementation-slot value is intentionally excluded because that slot must change from V1 to V1.1. The expected old and new implementation addresses are included instead, and the verifier separately requires the slot to contain the expected V1.1 address.
 
-Unchanged unsolicited token or vault-share dust at either implementation address is included and accepted; the tooling does not require those balances to be zero. Changes to any fingerprinted custody or protocol-state value cause a mismatch. A legitimate protocol action between preparation and verification also changes the relevant state and causes a mismatch, which is why Section 8 requires a controlled state freeze.
+Unchanged unsolicited token or vault-share dust at either implementation address and unchanged direct proxy collateral dust are included and accepted; the tooling does not require those balances to be zero. Changes to any fingerprinted custody or protocol-state value, including any direct proxy collateral delta during the controlled window, cause a mismatch. A legitimate protocol action between preparation and verification also changes the relevant state and causes a mismatch, which is why Section 8 requires a controlled state freeze.
 
 Raw mapping seed slots do not enumerate or cryptographically prove every mapping entry. Representative borrower, collateral-provider, and liquidity-provider positions are covered separately by the integration tests. The fingerprint is operational evidence for this controlled demonstration, not formal verification or a proof of all possible state.
 

@@ -486,6 +486,65 @@ contract UpgradeLendingPoolV1_1Test is Test {
         assertEq(vault.balanceOf(prepared.newImplementation), 17);
     }
 
+    function test_UnchangedDirectProxyCollateralDustIsIncludedAndAccepted() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+
+        address dustSender = makeAddr("proxyCollateralDustSender");
+        uint256 proxyCollateralDust = 23;
+        collateralToken.mint(dustSender, proxyCollateralDust);
+        vm.prank(dustSender);
+        assertTrue(collateralToken.transfer(address(pool), proxyCollateralDust));
+
+        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforePreparation = upgrader.snapshot(address(pool));
+        assertEq(beforePreparation.custody.proxyCollateralAssetBalance, proxyCollateralDust);
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+
+        (bytes32 verifiedStateHash,) = verifier.verify(verificationConfig);
+        assertEq(verifiedStateHash, prepared.preUpgradeStateHash);
+        assertEq(collateralToken.balanceOf(address(pool)), proxyCollateralDust);
+    }
+
+    function test_DirectProxyCollateralDeltaAfterPreparationIsRejected() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+
+        address dustSender = makeAddr("proxyCollateralDeltaSender");
+        uint256 preparedProxyCollateralBalance = 23;
+        uint256 proxyCollateralDelta = 1;
+        collateralToken.mint(dustSender, preparedProxyCollateralBalance + proxyCollateralDelta);
+        vm.startPrank(dustSender);
+        assertTrue(collateralToken.transfer(address(pool), preparedProxyCollateralBalance));
+
+        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforePreparation = upgrader.snapshot(address(pool));
+        assertEq(beforePreparation.custody.proxyCollateralAssetBalance, preparedProxyCollateralBalance);
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+
+        assertTrue(collateralToken.transfer(address(pool), proxyCollateralDelta));
+        vm.stopPrank();
+        authority.forward(prepared.target, prepared.value, prepared.data);
+
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+        bytes32 actualStateHash = _recomputeCanonicalFingerprint(prepared);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                VerifyLendingPoolV1_1Upgrade.StateFingerprintMismatch.selector,
+                prepared.preUpgradeStateHash,
+                actualStateHash
+            )
+        );
+        verifier.verify(verificationConfig);
+
+        assertEq(_implementationWord(), _addressWord(prepared.newImplementation));
+        assertEq(LendingPoolV1_1(address(pool)).version(), "1.1");
+    }
+
     function test_ImplementationCustodyDeltaAfterPreparationIsRejected() public {
         ForwardingAuthority authority = new ForwardingAuthority();
         _redeployWithAuthority(address(authority));

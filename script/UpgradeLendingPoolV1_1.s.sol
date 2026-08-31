@@ -29,7 +29,7 @@ interface ILendingPoolSnapshotView {
 }
 
 library LendingPoolV1_1UpgradeStateFingerprint {
-    bytes32 internal constant DOMAIN_SEPARATOR = keccak256("LendingPoolV1.1UpgradeStateFingerprint/v1");
+    bytes32 internal constant DOMAIN_SEPARATOR = keccak256("LendingPoolV1.1UpgradeStateFingerprint/v2");
 
     struct ConfigurationSnapshot {
         address priceFeed;
@@ -53,6 +53,7 @@ library LendingPoolV1_1UpgradeStateFingerprint {
     }
 
     struct CustodySnapshot {
+        uint256 proxyCollateralAssetBalance;
         uint256 proxyDebtAssetBalance;
         uint256 proxyVaultShareBalance;
         uint256 vaultTotalAssets;
@@ -413,6 +414,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         view
         returns (LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot memory custody)
     {
+        custody.proxyCollateralAssetBalance = _readBalance(config.collateralAsset, proxy);
         custody.proxyDebtAssetBalance = _readBalance(config.debtAsset, proxy);
         custody.proxyVaultShareBalance = _readBalance(config.vault, proxy);
         custody.vaultTotalAssets = _readExternalUint(config.vault, abi.encodeWithSignature("totalAssets()"));
@@ -451,6 +453,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot memory expected,
         LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot memory actual
     ) internal pure {
+        _checkUint("proxyCollateralBalance", expected.proxyCollateralAssetBalance, actual.proxyCollateralAssetBalance);
         _checkUint("proxyDebtBalance", expected.proxyDebtAssetBalance, actual.proxyDebtAssetBalance);
         _checkUint("proxyVaultShares", expected.proxyVaultShareBalance, actual.proxyVaultShareBalance);
         _checkUint("vaultTotalAssets", expected.vaultTotalAssets, actual.vaultTotalAssets);
