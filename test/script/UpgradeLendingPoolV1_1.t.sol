@@ -16,6 +16,19 @@ import {LendingPool} from "../../src/core/lending/LendingPool.sol";
 import {LendingPoolV1_1} from "../../src/core/lending/LendingPoolV1_1.sol";
 import {CollateralVault} from "../../src/core/vault/CollateralVault.sol";
 
+contract ForwardingAuthority {
+    function forward(address target, uint256 value, bytes calldata data) external payable returns (bytes memory) {
+        require(msg.value == value, "value mismatch");
+        (bool success, bytes memory returnData) = target.call{value: value}(data);
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+        return returnData;
+    }
+}
+
 contract UpgradeLendingPoolV1_1Test is Test {
     bytes32 internal constant ERC1967_IMPLEMENTATION_SLOT =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
@@ -59,92 +72,58 @@ contract UpgradeLendingPoolV1_1Test is Test {
         (vault, v1Implementation, proxy, pool) = deployer.deploy(_deploymentConfig());
     }
 
-    function test_UpgradeDeploysV1_1AndUpgradesExpectedProxyFromExpectedV1() public {
+    function test_PrepareDeploysV11AndReturnsExactExternalAuthorityTransaction() public {
         UpgradeLendingPoolV1_1.UpgradeConfig memory config = _upgradeConfig(address(0));
 
         assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
-        address proxyBefore = address(pool);
-
-        upgrader.validatePreUpgrade(config);
-        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforeUpgrade = upgrader.snapshot(address(pool));
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory oldImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(v1Implementation));
-
         uint64 nonceBefore = vm.getNonce(address(upgrader));
-        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory newImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(newImplementation));
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(config);
+
         assertEq(vm.getNonce(address(upgrader)), nonceBefore + 1);
-        assertGt(address(newImplementation).code.length, 0);
-        assertNotEq(address(newImplementation), address(pool));
-        assertNotEq(address(newImplementation), address(v1Implementation));
-
-        bytes memory upgradeCall = upgrader.encodeUpgradeCall(address(newImplementation));
+        assertEq(prepared.proxy, address(pool));
+        assertEq(prepared.expectedCurrentImplementation, address(v1Implementation));
+        assertEq(prepared.expectedUpgradeAuthority, activeAuthority);
+        assertEq(prepared.target, address(pool));
+        assertEq(prepared.value, 0);
+        assertGt(prepared.newImplementation.code.length, 0);
+        assertNotEq(prepared.newImplementation, address(pool));
+        assertNotEq(prepared.newImplementation, address(v1Implementation));
+        assertEq(LendingPoolV1_1(prepared.newImplementation).version(), "1.1");
         assertEq(
-            upgradeCall,
-            abi.encodeWithSelector(UUPSUpgradeable.upgradeToAndCall.selector, address(newImplementation), bytes(""))
+            prepared.data,
+            abi.encodeWithSelector(UUPSUpgradeable.upgradeToAndCall.selector, prepared.newImplementation, bytes(""))
         );
-
-        vm.prank(activeAuthority);
-        _executeEncodedUpgrade(upgradeCall);
-
-        upgrader.validatePostUpgrade(
-            config, beforeUpgrade, address(newImplementation), oldImplementationCustody, newImplementationCustody
-        );
-        assertEq(address(pool), proxyBefore);
-        assertEq(_implementationWord(), _addressWord(address(newImplementation)));
-        assertEq(LendingPoolV1_1(address(pool)).version(), "1.1");
+        assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
     }
 
-    function test_UpgradePreservesLegacySlotsAuthorityAccountingAndCustody() public {
+    function test_PrepareDoesNotUpgradeProxyOrMutateV1State() public {
         _buildRepresentativeState();
 
         vm.prank(activeAuthority);
         pool.proposeUpgradeAuthority(pendingAuthority);
 
         UpgradeLendingPoolV1_1.UpgradeConfig memory config = _upgradeConfig(pendingAuthority);
-        upgrader.validatePreUpgrade(config);
-        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforeUpgrade = upgrader.snapshot(address(pool));
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory oldImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(v1Implementation));
+        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforePreparation = upgrader.snapshot(address(pool));
 
-        assertGt(beforeUpgrade.accounting.borrowIndex, 0);
-        assertGt(beforeUpgrade.accounting.lastBorrowIndexUpdate, 0);
-        assertGt(beforeUpgrade.accounting.totalCollateralShares, 0);
-        assertGt(beforeUpgrade.accounting.totalLiquidity, 0);
-        assertGt(beforeUpgrade.accounting.totalScaledDebt, 0);
-        assertGt(beforeUpgrade.custody.proxyDebtAssetBalance, 0);
-        assertGt(beforeUpgrade.custody.proxyVaultShareBalance, 0);
-        assertGt(beforeUpgrade.custody.vaultTotalAssets, 0);
-        assertGt(beforeUpgrade.custody.vaultTotalSupply, 0);
-        assertGt(beforeUpgrade.custody.vaultCollateralAssetBalance, 0);
+        assertGt(beforePreparation.accounting.totalCollateralShares, 0);
+        assertGt(beforePreparation.accounting.totalLiquidity, 0);
+        assertGt(beforePreparation.accounting.totalScaledDebt, 0);
+        assertGt(beforePreparation.custody.proxyDebtAssetBalance, 0);
+        assertGt(beforePreparation.custody.proxyVaultShareBalance, 0);
 
-        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory newImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(newImplementation));
-        bytes memory upgradeCall = upgrader.encodeUpgradeCall(address(newImplementation));
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(config);
 
-        vm.prank(activeAuthority);
-        _executeEncodedUpgrade(upgradeCall);
-
-        upgrader.validatePostUpgrade(
-            config, beforeUpgrade, address(newImplementation), oldImplementationCustody, newImplementationCustody
-        );
+        assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
+        (bool versionAvailable,) = address(pool).staticcall(abi.encodeCall(LendingPoolV1_1.version, ()));
+        assertFalse(versionAvailable);
         assertEq(pool.upgradeAuthority(), activeAuthority);
         assertEq(pool.pendingUpgradeAuthority(), pendingAuthority);
-        assertEq(collateralToken.balanceOf(address(v1Implementation)), 0);
-        assertEq(debtToken.balanceOf(address(v1Implementation)), 0);
-        assertEq(vault.balanceOf(address(v1Implementation)), 0);
-        assertEq(collateralToken.balanceOf(address(newImplementation)), 0);
-        assertEq(debtToken.balanceOf(address(newImplementation)), 0);
-        assertEq(vault.balanceOf(address(newImplementation)), 0);
+        assertEq(prepared.target, address(pool));
+        upgrader.validatePreservedState(beforePreparation);
     }
 
-    function test_PreExistingImplementationDustDoesNotBlockUpgradeWhenBalancesArePreserved() public {
+    function test_PreExistingImplementationDustDoesNotBlockPreparationOrMoveAssets() public {
         _buildRepresentativeState();
-
-        vm.prank(activeAuthority);
-        pool.proposeUpgradeAuthority(pendingAuthority);
 
         address dustSender = makeAddr("dustSender");
         uint256 oldCollateralDust = 3;
@@ -153,6 +132,9 @@ contract UpgradeLendingPoolV1_1Test is Test {
         uint256 newCollateralDust = 11;
         uint256 newDebtDust = 13;
         uint256 newVaultShareDust = 17;
+
+        address counterfactualImplementation =
+            vm.computeCreateAddress(address(upgrader), vm.getNonce(address(upgrader)));
 
         collateralToken.mint(dustSender, oldCollateralDust + newCollateralDust + oldVaultShareDust + newVaultShareDust);
         debtToken.mint(dustSender, oldDebtDust + newDebtDust);
@@ -164,82 +146,46 @@ contract UpgradeLendingPoolV1_1Test is Test {
         assertTrue(collateralToken.transfer(address(v1Implementation), oldCollateralDust));
         assertTrue(debtToken.transfer(address(v1Implementation), oldDebtDust));
         assertTrue(vault.transfer(address(v1Implementation), oldVaultShareDust));
+        assertTrue(collateralToken.transfer(counterfactualImplementation, newCollateralDust));
+        assertTrue(debtToken.transfer(counterfactualImplementation, newDebtDust));
+        assertTrue(vault.transfer(counterfactualImplementation, newVaultShareDust));
         vm.stopPrank();
 
-        UpgradeLendingPoolV1_1.UpgradeConfig memory config = _upgradeConfig(pendingAuthority);
-        upgrader.validatePreUpgrade(config);
-        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforeUpgrade = upgrader.snapshot(address(pool));
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory oldImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(v1Implementation));
+        UpgradeLendingPoolV1_1.UpgradeConfig memory config = _upgradeConfig(address(0));
+        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforePreparation = upgrader.snapshot(address(pool));
         uint256 proxyCollateralBalanceBefore = collateralToken.balanceOf(address(pool));
 
-        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(config);
 
-        vm.startPrank(dustSender);
-        assertTrue(collateralToken.transfer(address(newImplementation), newCollateralDust));
-        assertTrue(debtToken.transfer(address(newImplementation), newDebtDust));
-        assertTrue(vault.transfer(address(newImplementation), newVaultShareDust));
-        vm.stopPrank();
-
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory newImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(newImplementation));
-
-        bytes memory upgradeCall = upgrader.encodeUpgradeCall(address(newImplementation));
-        vm.prank(activeAuthority);
-        _executeEncodedUpgrade(upgradeCall);
-
-        upgrader.validatePostUpgrade(
-            config, beforeUpgrade, address(newImplementation), oldImplementationCustody, newImplementationCustody
-        );
-
-        assertEq(_implementationWord(), _addressWord(address(newImplementation)));
-        assertEq(LendingPoolV1_1(address(pool)).version(), "1.1");
+        assertEq(prepared.newImplementation, counterfactualImplementation);
+        assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
         assertEq(collateralToken.balanceOf(address(v1Implementation)), oldCollateralDust);
         assertEq(debtToken.balanceOf(address(v1Implementation)), oldDebtDust);
         assertEq(vault.balanceOf(address(v1Implementation)), oldVaultShareDust);
-        assertEq(collateralToken.balanceOf(address(newImplementation)), newCollateralDust);
-        assertEq(debtToken.balanceOf(address(newImplementation)), newDebtDust);
-        assertEq(vault.balanceOf(address(newImplementation)), newVaultShareDust);
+        assertEq(collateralToken.balanceOf(prepared.newImplementation), newCollateralDust);
+        assertEq(debtToken.balanceOf(prepared.newImplementation), newDebtDust);
+        assertEq(vault.balanceOf(prepared.newImplementation), newVaultShareDust);
         assertEq(collateralToken.balanceOf(address(pool)), proxyCollateralBalanceBefore);
-        assertEq(debtToken.balanceOf(address(pool)), beforeUpgrade.custody.proxyDebtAssetBalance);
-        assertEq(vault.balanceOf(address(pool)), beforeUpgrade.custody.proxyVaultShareBalance);
+        assertEq(debtToken.balanceOf(address(pool)), beforePreparation.custody.proxyDebtAssetBalance);
+        assertEq(vault.balanceOf(address(pool)), beforePreparation.custody.proxyVaultShareBalance);
         assertEq(pool.upgradeAuthority(), activeAuthority);
-        assertEq(pool.pendingUpgradeAuthority(), pendingAuthority);
+        assertEq(pool.pendingUpgradeAuthority(), address(0));
     }
 
-    function test_PostUpgradeValidationRejectsImplementationCustodyBalanceDelta() public {
-        UpgradeLendingPoolV1_1.UpgradeConfig memory config = _upgradeConfig(address(0));
-        upgrader.validatePreUpgrade(config);
-        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforeUpgrade = upgrader.snapshot(address(pool));
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory oldImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(v1Implementation));
+    function test_PrepareSupportsContractUpgradeAuthorityAndUnrelatedBroadcaster() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+        _setUpgradeEnvironment();
+        uint64 broadcasterNonceBefore = vm.getNonce(DEFAULT_SENDER);
 
-        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
-        UpgradeLendingPoolV1_1.ImplementationCustodySnapshot memory newImplementationCustody =
-            upgrader.snapshotImplementationCustody(beforeUpgrade.configuration, address(newImplementation));
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.run();
 
-        bytes memory upgradeCall = upgrader.encodeUpgradeCall(address(newImplementation));
-        vm.prank(activeAuthority);
-        _executeEncodedUpgrade(upgradeCall);
-
-        assertEq(_implementationWord(), _addressWord(address(newImplementation)));
-        assertEq(LendingPoolV1_1(address(pool)).version(), "1.1");
-
-        uint256 custodyChange = 1;
-        debtToken.mint(address(newImplementation), custodyChange);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                UpgradeLendingPoolV1_1.ImplementationCustodyBalanceChanged.selector,
-                address(newImplementation),
-                address(debtToken),
-                newImplementationCustody.debtAssetBalance,
-                newImplementationCustody.debtAssetBalance + custodyChange
-            )
-        );
-        upgrader.validatePostUpgrade(
-            config, beforeUpgrade, address(newImplementation), oldImplementationCustody, newImplementationCustody
-        );
+        assertNotEq(DEFAULT_SENDER, address(authority));
+        assertEq(vm.getNonce(DEFAULT_SENDER), broadcasterNonceBefore + 1);
+        assertEq(prepared.newImplementation, vm.computeCreateAddress(DEFAULT_SENDER, broadcasterNonceBefore));
+        assertEq(prepared.expectedUpgradeAuthority, address(authority));
+        assertEq(pool.upgradeAuthority(), address(authority));
+        assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
     }
 
     function test_PreflightRejectsZeroOrNonContractProxyBeforeDeployment() public {
@@ -346,24 +292,38 @@ contract UpgradeLendingPoolV1_1Test is Test {
         );
     }
 
-    function test_NonAuthorityCannotExecuteUpgradeAndProxyStateRemainsUnchanged() public {
+    function test_ContractAuthorityCanExecutePreparedTransaction() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+        _buildRepresentativeState();
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+
+        assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+
+        assertEq(_implementationWord(), _addressWord(prepared.newImplementation));
+        assertEq(LendingPoolV1_1(address(pool)).version(), "1.1");
+        assertEq(pool.totalLiquidity(), 1_000 ether);
+        assertGt(pool.totalScaledDebt(), 0);
+    }
+
+    function test_UnrelatedEoaCannotExecutePreparedTransaction() public {
         _buildRepresentativeState();
 
         UpgradeLendingPoolV1_1.UpgradeConfig memory config = _upgradeConfig(address(0));
-        upgrader.validatePreUpgrade(config);
-        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforeUpgrade = upgrader.snapshot(address(pool));
-        LendingPoolV1_1 newImplementation = upgrader.deployV11(config);
-        bytes memory upgradeCall = upgrader.encodeUpgradeCall(address(newImplementation));
+        UpgradeLendingPoolV1_1.UpgradeSnapshot memory beforePreparation = upgrader.snapshot(address(pool));
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(config);
 
         vm.prank(nonAuthority);
         vm.expectRevert(abi.encodeWithSelector(LendingPool.UnauthorizedUpgradeAuthority.selector, nonAuthority));
-        _executeEncodedUpgrade(upgradeCall);
+        _executePrepared(prepared);
 
         assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
         assertEq(pool.upgradeAuthority(), activeAuthority);
         assertEq(pool.pendingUpgradeAuthority(), address(0));
         upgrader.validatePreUpgrade(config);
-        upgrader.validatePreservedState(beforeUpgrade);
+        upgrader.validatePreservedState(beforePreparation);
     }
 
     function _buildRepresentativeState() internal {
@@ -394,18 +354,36 @@ contract UpgradeLendingPoolV1_1Test is Test {
         uint64 nonceBefore = vm.getNonce(address(upgrader));
 
         vm.expectRevert(expectedRevert);
-        upgrader.validatePreUpgrade(config);
+        upgrader.prepare(config);
 
         assertEq(vm.getNonce(address(upgrader)), nonceBefore);
     }
 
-    function _executeEncodedUpgrade(bytes memory upgradeCall) internal {
-        (bool success, bytes memory returnData) = address(pool).call(upgradeCall);
+    function _executePrepared(UpgradeLendingPoolV1_1.PreparedTransaction memory prepared) internal {
+        (bool success, bytes memory returnData) = prepared.target.call{value: prepared.value}(prepared.data);
         if (!success) {
             assembly ("memory-safe") {
                 revert(add(returnData, 0x20), mload(returnData))
             }
         }
+    }
+
+    function _redeployWithAuthority(address authority) internal {
+        activeAuthority = authority;
+        (vault, v1Implementation, proxy, pool) = deployer.deploy(_deploymentConfig());
+    }
+
+    function _setUpgradeEnvironment() internal {
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("LENDING_POOL_PROXY", vm.toString(address(pool)));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_V1_IMPLEMENTATION", vm.toString(address(v1Implementation)));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_UPGRADE_AUTHORITY", vm.toString(activeAuthority));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_PENDING_UPGRADE_AUTHORITY", vm.toString(address(0)));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_CHAIN_ID", vm.toString(block.chainid));
     }
 
     function _deploymentConfig() internal view returns (DeployLendingPoolV1.DeploymentConfig memory) {

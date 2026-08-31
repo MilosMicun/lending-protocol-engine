@@ -84,6 +84,16 @@ contract UpgradeLendingPoolV1_1 is Script {
         CustodySnapshot custody;
     }
 
+    struct PreparedTransaction {
+        address proxy;
+        address expectedCurrentImplementation;
+        address newImplementation;
+        address expectedUpgradeAuthority;
+        address target;
+        uint256 value;
+        bytes data;
+    }
+
     error InvalidLendingPoolProxy(address lendingPoolProxy);
     error LendingPoolProxyHasNoCode(address lendingPoolProxy);
     error InvalidExpectedCurrentImplementation(address expectedCurrentImplementation);
@@ -100,10 +110,9 @@ contract UpgradeLendingPoolV1_1 is Script {
     error NewImplementationHasNoCode(address implementation);
     error NewImplementationMatchesProxy(address implementation);
     error NewImplementationMatchesCurrentImplementation(address implementation);
-    error UpgradeCallFailed(bytes revertData);
     error ProxyAddressChanged(address expectedProxy, address actualProxy);
-    error FinalImplementationMismatch(bytes32 expectedImplementationWord, bytes32 actualImplementationWord);
-    error VersionReadFailed(address lendingPoolProxy);
+    error PreparedImplementationAddressMismatch(address expectedImplementation, address actualImplementation);
+    error VersionReadFailed(address implementation);
     error UnexpectedVersion(string actualVersion);
     error SnapshotValueChanged(bytes32 field, bytes32 expectedValue, bytes32 actualValue);
     error UnexpectedImplementationCustodySnapshot(address expectedImplementation, address actualImplementation);
@@ -114,26 +123,41 @@ contract UpgradeLendingPoolV1_1 is Script {
     bytes32 public constant ERC1967_IMPLEMENTATION_SLOT =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
-    function run() external returns (LendingPoolV1_1 newImplementation) {
+    function run() external returns (PreparedTransaction memory prepared) {
         UpgradeConfig memory config = _readUpgradeConfig();
 
         validatePreUpgrade(config);
-        UpgradeSnapshot memory beforeUpgrade = snapshot(config.lendingPoolProxy);
+        UpgradeSnapshot memory beforePreparation = snapshot(config.lendingPoolProxy);
         ImplementationCustodySnapshot memory oldImplementationCustody =
-            snapshotImplementationCustody(beforeUpgrade.configuration, config.expectedCurrentImplementation);
+            snapshotImplementationCustody(beforePreparation.configuration, config.expectedCurrentImplementation);
 
-        vm.startBroadcast(config.expectedUpgradeAuthority);
-        newImplementation = deployV11(config);
+        vm.startBroadcast();
+        address expectedNewImplementation = _nextDeploymentAddress(_broadcastSender());
         ImplementationCustodySnapshot memory newImplementationCustody =
-            snapshotImplementationCustody(beforeUpgrade.configuration, address(newImplementation));
-        bytes memory callData = encodeUpgradeCall(address(newImplementation));
-        _executeUpgrade(config.lendingPoolProxy, callData);
+            snapshotImplementationCustody(beforePreparation.configuration, expectedNewImplementation);
+        LendingPoolV1_1 newImplementation = deployV11(config);
         vm.stopBroadcast();
 
-        validatePostUpgrade(
-            config, beforeUpgrade, address(newImplementation), oldImplementationCustody, newImplementationCustody
+        prepared = _validateAndPrepare(
+            config, beforePreparation, address(newImplementation), oldImplementationCustody, newImplementationCustody
         );
-        _logUpgrade(config, address(newImplementation));
+        _logPreparation(prepared);
+    }
+
+    function prepare(UpgradeConfig memory config) public returns (PreparedTransaction memory prepared) {
+        validatePreUpgrade(config);
+        UpgradeSnapshot memory beforePreparation = snapshot(config.lendingPoolProxy);
+        ImplementationCustodySnapshot memory oldImplementationCustody =
+            snapshotImplementationCustody(beforePreparation.configuration, config.expectedCurrentImplementation);
+        address expectedNewImplementation = _nextDeploymentAddress(address(this));
+        ImplementationCustodySnapshot memory newImplementationCustody =
+            snapshotImplementationCustody(beforePreparation.configuration, expectedNewImplementation);
+
+        LendingPoolV1_1 newImplementation = deployV11(config);
+
+        prepared = _validateAndPrepare(
+            config, beforePreparation, address(newImplementation), oldImplementationCustody, newImplementationCustody
+        );
     }
 
     function validateConfig(UpgradeConfig memory config) public view {
@@ -225,6 +249,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         }
 
         _validateProxiableUuid(implementation);
+        _validateVersion(implementation);
     }
 
     function encodeUpgradeCall(address newImplementation) public pure returns (bytes memory) {
@@ -238,6 +263,8 @@ contract UpgradeLendingPoolV1_1 is Script {
             revert ProxyAddressChanged(beforeUpgrade.lendingPoolProxy, afterUpgrade.lendingPoolProxy);
         }
 
+        _checkBytes32("implementation", beforeUpgrade.implementationWord, afterUpgrade.implementationWord);
+
         _checkAddress("activeAuthority", beforeUpgrade.activeUpgradeAuthority, afterUpgrade.activeUpgradeAuthority);
         _checkAddress("pendingAuthority", beforeUpgrade.pendingUpgradeAuthority, afterUpgrade.pendingUpgradeAuthority);
 
@@ -250,40 +277,44 @@ contract UpgradeLendingPoolV1_1 is Script {
         _validateCustody(beforeUpgrade.custody, afterUpgrade.custody);
     }
 
-    function validatePostUpgrade(
+    function _validateAndPrepare(
         UpgradeConfig memory config,
-        UpgradeSnapshot memory beforeUpgrade,
+        UpgradeSnapshot memory beforePreparation,
         address newImplementation,
         ImplementationCustodySnapshot memory oldImplementationCustody,
         ImplementationCustodySnapshot memory newImplementationCustody
-    ) public view {
-        if (beforeUpgrade.lendingPoolProxy != config.lendingPoolProxy) {
-            revert ProxyAddressChanged(config.lendingPoolProxy, beforeUpgrade.lendingPoolProxy);
+    ) internal view returns (PreparedTransaction memory prepared) {
+        if (beforePreparation.lendingPoolProxy != config.lendingPoolProxy) {
+            revert ProxyAddressChanged(config.lendingPoolProxy, beforePreparation.lendingPoolProxy);
         }
 
         _validateImplementationCustodySnapshotAddress(
             config.expectedCurrentImplementation, oldImplementationCustody.implementation
         );
-        _validateImplementationCustodySnapshotAddress(newImplementation, newImplementationCustody.implementation);
+        if (newImplementationCustody.implementation != newImplementation) {
+            revert PreparedImplementationAddressMismatch(newImplementationCustody.implementation, newImplementation);
+        }
 
         bytes32 expectedPreviousWord = _addressWord(config.expectedCurrentImplementation);
-        if (beforeUpgrade.implementationWord != expectedPreviousWord) {
-            revert UnexpectedCurrentImplementation(expectedPreviousWord, beforeUpgrade.implementationWord);
+        if (beforePreparation.implementationWord != expectedPreviousWord) {
+            revert UnexpectedCurrentImplementation(expectedPreviousWord, beforePreparation.implementationWord);
         }
 
-        bytes32 finalImplementationWord = vm.load(config.lendingPoolProxy, ERC1967_IMPLEMENTATION_SLOT);
-        bytes32 expectedFinalWord = _addressWord(newImplementation);
-        if (finalImplementationWord != expectedFinalWord) {
-            revert FinalImplementationMismatch(expectedFinalWord, finalImplementationWord);
-        }
-        if (finalImplementationWord == beforeUpgrade.implementationWord) {
-            revert FinalImplementationMismatch(expectedFinalWord, beforeUpgrade.implementationWord);
-        }
+        _validateProxiableUuid(newImplementation);
+        _validateVersion(newImplementation);
+        validatePreservedState(beforePreparation);
+        _validateImplementationCustodyUnchanged(beforePreparation.configuration, oldImplementationCustody);
+        _validateImplementationCustodyUnchanged(beforePreparation.configuration, newImplementationCustody);
 
-        _validateVersion(config.lendingPoolProxy);
-        validatePreservedState(beforeUpgrade);
-        _validateImplementationCustodyUnchanged(beforeUpgrade.configuration, oldImplementationCustody);
-        _validateImplementationCustodyUnchanged(beforeUpgrade.configuration, newImplementationCustody);
+        prepared = PreparedTransaction({
+            proxy: config.lendingPoolProxy,
+            expectedCurrentImplementation: config.expectedCurrentImplementation,
+            newImplementation: newImplementation,
+            expectedUpgradeAuthority: config.expectedUpgradeAuthority,
+            target: config.lendingPoolProxy,
+            value: 0,
+            data: encodeUpgradeCall(newImplementation)
+        });
     }
 
     function _snapshotConfiguration(address proxy) internal view returns (ConfigurationSnapshot memory config) {
@@ -411,26 +442,22 @@ contract UpgradeLendingPoolV1_1 is Script {
         }
     }
 
-    function _validateVersion(address proxy) internal pure {
-        try LendingPoolV1_1(proxy).version() returns (string memory actualVersion) {
+    function _validateVersion(address implementation) internal pure {
+        try LendingPoolV1_1(implementation).version() returns (string memory actualVersion) {
             if (keccak256(bytes(actualVersion)) != keccak256(bytes("1.1"))) {
                 revert UnexpectedVersion(actualVersion);
             }
         } catch {
-            revert VersionReadFailed(proxy);
+            revert VersionReadFailed(implementation);
         }
     }
 
-    function _executeUpgrade(address proxy, bytes memory callData) internal {
-        (bool success, bytes memory returnData) = proxy.call(callData);
-        if (!success) {
-            if (returnData.length == 0) {
-                revert UpgradeCallFailed(returnData);
-            }
-            assembly ("memory-safe") {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
+    function _nextDeploymentAddress(address deploymentSender) internal view returns (address) {
+        return vm.computeCreateAddress(deploymentSender, vm.getNonce(deploymentSender));
+    }
+
+    function _broadcastSender() internal returns (address broadcastSender) {
+        (, broadcastSender,) = vm.readCallers();
     }
 
     function _readProxyAddress(address proxy, bytes4 selector) internal view returns (address) {
@@ -500,13 +527,15 @@ contract UpgradeLendingPoolV1_1 is Script {
         });
     }
 
-    function _logUpgrade(UpgradeConfig memory config, address newImplementation) internal view {
+    function _logPreparation(PreparedTransaction memory prepared) internal view {
         console2.log("Chain ID:", block.chainid);
-        console2.log("LendingPool proxy:", config.lendingPoolProxy);
-        console2.log("Previous implementation:", config.expectedCurrentImplementation);
-        console2.log("New implementation:", newImplementation);
-        console2.log("Active upgrade authority:", config.expectedUpgradeAuthority);
-        console2.log("Pending upgrade authority:", config.expectedPendingUpgradeAuthority);
-        console2.log("Version: 1.1");
+        console2.log("LendingPool proxy:", prepared.proxy);
+        console2.log("Expected current implementation:", prepared.expectedCurrentImplementation);
+        console2.log("New implementation:", prepared.newImplementation);
+        console2.log("Expected upgrade authority:", prepared.expectedUpgradeAuthority);
+        console2.log("Target:", prepared.target);
+        console2.log("Value:", prepared.value);
+        console2.log("Calldata:");
+        console2.logBytes(prepared.data);
     }
 }
