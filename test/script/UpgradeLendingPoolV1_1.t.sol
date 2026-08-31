@@ -7,7 +7,11 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 import {DeployLendingPoolV1} from "../../script/DeployLendingPoolV1.s.sol";
-import {UpgradeLendingPoolV1_1} from "../../script/UpgradeLendingPoolV1_1.s.sol";
+import {
+    LendingPoolV1_1UpgradeStateFingerprint,
+    UpgradeLendingPoolV1_1
+} from "../../script/UpgradeLendingPoolV1_1.s.sol";
+import {VerifyLendingPoolV1_1Upgrade} from "../../script/VerifyLendingPoolV1_1Upgrade.s.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 import {WrongUUIDImplementation} from "../mocks/WrongUUIDImplementation.sol";
@@ -30,6 +34,16 @@ contract ForwardingAuthority {
 }
 
 contract UpgradeLendingPoolV1_1Test is Test {
+    struct ReadOnlyVerificationSnapshot {
+        bytes32 proxyStateHash;
+        bytes32 oldImplementationCustodyHash;
+        bytes32 newImplementationCustodyHash;
+        uint64 testNonce;
+        uint64 verifierNonce;
+        uint64 authorityNonce;
+        uint64 proxyNonce;
+    }
+
     bytes32 internal constant ERC1967_IMPLEMENTATION_SLOT =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
@@ -42,6 +56,7 @@ contract UpgradeLendingPoolV1_1Test is Test {
 
     DeployLendingPoolV1 internal deployer;
     UpgradeLendingPoolV1_1 internal upgrader;
+    VerifyLendingPoolV1_1Upgrade internal verifier;
     MockERC20 internal collateralToken;
     MockERC20 internal debtToken;
     MockV3Aggregator internal priceFeed;
@@ -59,6 +74,7 @@ contract UpgradeLendingPoolV1_1Test is Test {
     function setUp() public {
         deployer = new DeployLendingPoolV1();
         upgrader = new UpgradeLendingPoolV1_1();
+        verifier = new VerifyLendingPoolV1_1Upgrade();
         collateralToken = new MockERC20("Collateral Token", "COL");
         debtToken = new MockERC20("Debt Token", "DEBT");
         priceFeed = new MockV3Aggregator(8, 1e8, block.timestamp);
@@ -324,6 +340,302 @@ contract UpgradeLendingPoolV1_1Test is Test {
         assertEq(pool.pendingUpgradeAuthority(), address(0));
         upgrader.validatePreUpgrade(config);
         upgrader.validatePreservedState(beforePreparation);
+    }
+
+    function test_PreparationReturnsCanonicalPreUpgradeStateHash() public {
+        _buildRepresentativeState();
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        bytes32 independentlyRecomputedHash = _recomputeCanonicalFingerprint(prepared);
+
+        assertEq(prepared.preUpgradeStateHash, independentlyRecomputedHash);
+        assertEq(_implementationWord(), _addressWord(address(v1Implementation)));
+    }
+
+    function test_VerifierAcceptsContractAuthorityUpgradeWithPreservedState() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+        _buildRepresentativeState();
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        _setVerificationEnvironment(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+
+        assertEq(verifier.run(), prepared.preUpgradeStateHash);
+    }
+
+    function test_VerifierIsReadOnly() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+        _buildRepresentativeState();
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+
+        ReadOnlyVerificationSnapshot memory beforeVerification = _readOnlySnapshot(prepared, address(authority));
+
+        (bytes32 verifiedStateHash,) = verifier.verify(verificationConfig);
+        assertEq(verifiedStateHash, prepared.preUpgradeStateHash);
+
+        ReadOnlyVerificationSnapshot memory afterVerification = _readOnlySnapshot(prepared, address(authority));
+        assertEq(keccak256(abi.encode(afterVerification)), keccak256(abi.encode(beforeVerification)));
+    }
+
+    function test_VerifierRejectsIncorrectExpectedStateHash() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        bytes32 incorrectExpectedHash = bytes32(uint256(prepared.preUpgradeStateHash) ^ 1);
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, incorrectExpectedHash, address(authority), address(0));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                VerifyLendingPoolV1_1Upgrade.StateFingerprintMismatch.selector,
+                incorrectExpectedHash,
+                prepared.preUpgradeStateHash
+            )
+        );
+        verifier.verify(verificationConfig);
+    }
+
+    function test_VerifierRejectsUnexpectedCurrentImplementation() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                VerifyLendingPoolV1_1Upgrade.UnexpectedCurrentImplementation.selector,
+                _addressWord(prepared.newImplementation),
+                _addressWord(address(v1Implementation))
+            )
+        );
+        verifier.verify(verificationConfig);
+    }
+
+    function test_VerifierRejectsAuthorityMismatch() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        address incorrectAuthority = makeAddr("incorrectAuthority");
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, incorrectAuthority, address(0));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                VerifyLendingPoolV1_1Upgrade.UnexpectedActiveUpgradeAuthority.selector,
+                incorrectAuthority,
+                address(authority)
+            )
+        );
+        verifier.verify(verificationConfig);
+    }
+
+    function test_VerifierRejectsPendingAuthorityMismatch() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        address incorrectPendingAuthority = makeAddr("incorrectPendingAuthority");
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), incorrectPendingAuthority);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                VerifyLendingPoolV1_1Upgrade.UnexpectedPendingUpgradeAuthority.selector,
+                incorrectPendingAuthority,
+                address(0)
+            )
+        );
+        verifier.verify(verificationConfig);
+    }
+
+    function test_UnchangedImplementationDustIsIncludedAndAccepted() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+        _buildRepresentativeState();
+
+        address counterfactualImplementation =
+            vm.computeCreateAddress(address(upgrader), vm.getNonce(address(upgrader)));
+        _fundImplementationDust(address(v1Implementation), counterfactualImplementation);
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        assertEq(prepared.newImplementation, counterfactualImplementation);
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+
+        (bytes32 verifiedStateHash,) = verifier.verify(verificationConfig);
+        assertEq(verifiedStateHash, prepared.preUpgradeStateHash);
+        assertEq(collateralToken.balanceOf(address(v1Implementation)), 3);
+        assertEq(debtToken.balanceOf(address(v1Implementation)), 5);
+        assertEq(vault.balanceOf(address(v1Implementation)), 7);
+        assertEq(collateralToken.balanceOf(prepared.newImplementation), 11);
+        assertEq(debtToken.balanceOf(prepared.newImplementation), 13);
+        assertEq(vault.balanceOf(prepared.newImplementation), 17);
+    }
+
+    function test_ImplementationCustodyDeltaAfterPreparationIsRejected() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        debtToken.mint(prepared.newImplementation, 1);
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+        bytes32 actualStateHash = _recomputeCanonicalFingerprint(prepared);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                VerifyLendingPoolV1_1Upgrade.StateFingerprintMismatch.selector,
+                prepared.preUpgradeStateHash,
+                actualStateHash
+            )
+        );
+        verifier.verify(verificationConfig);
+    }
+
+    function test_LegacyStateDeltaAfterPreparationIsRejected() public {
+        ForwardingAuthority authority = new ForwardingAuthority();
+        _redeployWithAuthority(address(authority));
+        _buildRepresentativeState();
+
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared = upgrader.prepare(_upgradeConfig(address(0)));
+        debtToken.mint(liquidityProvider, 1 ether);
+        vm.prank(liquidityProvider);
+        pool.depositLiquidity(1 ether);
+        authority.forward(prepared.target, prepared.value, prepared.data);
+        VerifyLendingPoolV1_1Upgrade.VerificationConfig memory verificationConfig =
+            _verificationConfig(prepared, prepared.preUpgradeStateHash, address(authority), address(0));
+        bytes32 actualStateHash = _recomputeCanonicalFingerprint(prepared);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                VerifyLendingPoolV1_1Upgrade.StateFingerprintMismatch.selector,
+                prepared.preUpgradeStateHash,
+                actualStateHash
+            )
+        );
+        verifier.verify(verificationConfig);
+    }
+
+    function _recomputeCanonicalFingerprint(UpgradeLendingPoolV1_1.PreparedTransaction memory prepared)
+        internal
+        view
+        returns (bytes32)
+    {
+        UpgradeLendingPoolV1_1.UpgradeSnapshot memory state = upgrader.snapshot(address(pool));
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory oldImplementationCustody =
+            upgrader.snapshotImplementationCustody(state.configuration, address(v1Implementation));
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory newImplementationCustody =
+            upgrader.snapshotImplementationCustody(state.configuration, prepared.newImplementation);
+
+        return LendingPoolV1_1UpgradeStateFingerprint.calculate(
+            LendingPoolV1_1UpgradeStateFingerprint.State({
+                chainId: block.chainid,
+                proxy: address(pool),
+                expectedOldImplementation: address(v1Implementation),
+                expectedNewImplementation: prepared.newImplementation,
+                legacySlots: state.legacySlots,
+                activeUpgradeAuthority: state.activeUpgradeAuthority,
+                pendingUpgradeAuthority: state.pendingUpgradeAuthority,
+                configuration: state.configuration,
+                accounting: state.accounting,
+                custody: state.custody,
+                oldImplementationCustody: oldImplementationCustody,
+                newImplementationCustody: newImplementationCustody
+            })
+        );
+    }
+
+    function _readOnlySnapshot(UpgradeLendingPoolV1_1.PreparedTransaction memory prepared, address authority)
+        internal
+        view
+        returns (ReadOnlyVerificationSnapshot memory readOnlyState)
+    {
+        UpgradeLendingPoolV1_1.UpgradeSnapshot memory state = upgrader.snapshot(address(pool));
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory oldImplementationCustody =
+            upgrader.snapshotImplementationCustody(state.configuration, address(v1Implementation));
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory newImplementationCustody =
+            upgrader.snapshotImplementationCustody(state.configuration, prepared.newImplementation);
+
+        readOnlyState = ReadOnlyVerificationSnapshot({
+            proxyStateHash: keccak256(abi.encode(state)),
+            oldImplementationCustodyHash: keccak256(abi.encode(oldImplementationCustody)),
+            newImplementationCustodyHash: keccak256(abi.encode(newImplementationCustody)),
+            testNonce: vm.getNonce(address(this)),
+            verifierNonce: vm.getNonce(address(verifier)),
+            authorityNonce: vm.getNonce(authority),
+            proxyNonce: vm.getNonce(address(pool))
+        });
+    }
+
+    function _fundImplementationDust(address oldImplementation, address counterfactualImplementation) internal {
+        address dustSender = makeAddr("verificationDustSender");
+        collateralToken.mint(dustSender, 38);
+        debtToken.mint(dustSender, 18);
+
+        vm.startPrank(dustSender);
+        collateralToken.approve(address(vault), 24);
+        assertEq(vault.deposit(24, dustSender), 24);
+        assertTrue(collateralToken.transfer(oldImplementation, 3));
+        assertTrue(debtToken.transfer(oldImplementation, 5));
+        assertTrue(vault.transfer(oldImplementation, 7));
+        assertTrue(collateralToken.transfer(counterfactualImplementation, 11));
+        assertTrue(debtToken.transfer(counterfactualImplementation, 13));
+        assertTrue(vault.transfer(counterfactualImplementation, 17));
+        vm.stopPrank();
+    }
+
+    function _setVerificationEnvironment(
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared,
+        bytes32 expectedStateHash,
+        address expectedActiveAuthority,
+        address expectedPendingAuthority
+    ) internal {
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_CHAIN_ID", vm.toString(block.chainid));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("LENDING_POOL_PROXY", vm.toString(address(pool)));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_OLD_IMPLEMENTATION", vm.toString(address(v1Implementation)));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_NEW_IMPLEMENTATION", vm.toString(prepared.newImplementation));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_UPGRADE_AUTHORITY", vm.toString(expectedActiveAuthority));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_PENDING_UPGRADE_AUTHORITY", vm.toString(expectedPendingAuthority));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        vm.setEnv("EXPECTED_PRE_UPGRADE_STATE_HASH", vm.toString(expectedStateHash));
+    }
+
+    function _verificationConfig(
+        UpgradeLendingPoolV1_1.PreparedTransaction memory prepared,
+        bytes32 expectedStateHash,
+        address expectedActiveAuthority,
+        address expectedPendingAuthority
+    ) internal view returns (VerifyLendingPoolV1_1Upgrade.VerificationConfig memory) {
+        return VerifyLendingPoolV1_1Upgrade.VerificationConfig({
+            expectedChainId: block.chainid,
+            lendingPoolProxy: address(pool),
+            expectedOldImplementation: address(v1Implementation),
+            expectedNewImplementation: prepared.newImplementation,
+            expectedUpgradeAuthority: expectedActiveAuthority,
+            expectedPendingUpgradeAuthority: expectedPendingAuthority,
+            expectedPreUpgradeStateHash: expectedStateHash
+        });
     }
 
     function _buildRepresentativeState() internal {

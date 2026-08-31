@@ -28,14 +28,8 @@ interface ILendingPoolSnapshotView {
     function totalScaledDebt() external view returns (uint256);
 }
 
-contract UpgradeLendingPoolV1_1 is Script {
-    struct UpgradeConfig {
-        address lendingPoolProxy;
-        address expectedCurrentImplementation;
-        address expectedUpgradeAuthority;
-        address expectedPendingUpgradeAuthority;
-        uint256 expectedChainId;
-    }
+library LendingPoolV1_1UpgradeStateFingerprint {
+    bytes32 internal constant DOMAIN_SEPARATOR = keccak256("LendingPoolV1.1UpgradeStateFingerprint/v1");
 
     struct ConfigurationSnapshot {
         address priceFeed;
@@ -73,15 +67,44 @@ contract UpgradeLendingPoolV1_1 is Script {
         uint256 vaultShareBalance;
     }
 
+    struct State {
+        uint256 chainId;
+        address proxy;
+        address expectedOldImplementation;
+        address expectedNewImplementation;
+        bytes32[18] legacySlots;
+        address activeUpgradeAuthority;
+        address pendingUpgradeAuthority;
+        ConfigurationSnapshot configuration;
+        AccountingSnapshot accounting;
+        CustodySnapshot custody;
+        ImplementationCustodySnapshot oldImplementationCustody;
+        ImplementationCustodySnapshot newImplementationCustody;
+    }
+
+    function calculate(State memory state) internal pure returns (bytes32) {
+        return keccak256(abi.encode(DOMAIN_SEPARATOR, state));
+    }
+}
+
+contract UpgradeLendingPoolV1_1 is Script {
+    struct UpgradeConfig {
+        address lendingPoolProxy;
+        address expectedCurrentImplementation;
+        address expectedUpgradeAuthority;
+        address expectedPendingUpgradeAuthority;
+        uint256 expectedChainId;
+    }
+
     struct UpgradeSnapshot {
         address lendingPoolProxy;
         bytes32 implementationWord;
         address activeUpgradeAuthority;
         address pendingUpgradeAuthority;
         bytes32[18] legacySlots;
-        ConfigurationSnapshot configuration;
-        AccountingSnapshot accounting;
-        CustodySnapshot custody;
+        LendingPoolV1_1UpgradeStateFingerprint.ConfigurationSnapshot configuration;
+        LendingPoolV1_1UpgradeStateFingerprint.AccountingSnapshot accounting;
+        LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot custody;
     }
 
     struct PreparedTransaction {
@@ -92,6 +115,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         address target;
         uint256 value;
         bytes data;
+        bytes32 preUpgradeStateHash;
     }
 
     error InvalidLendingPoolProxy(address lendingPoolProxy);
@@ -128,12 +152,12 @@ contract UpgradeLendingPoolV1_1 is Script {
 
         validatePreUpgrade(config);
         UpgradeSnapshot memory beforePreparation = snapshot(config.lendingPoolProxy);
-        ImplementationCustodySnapshot memory oldImplementationCustody =
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory oldImplementationCustody =
             snapshotImplementationCustody(beforePreparation.configuration, config.expectedCurrentImplementation);
 
         vm.startBroadcast();
         address expectedNewImplementation = _nextDeploymentAddress(_broadcastSender());
-        ImplementationCustodySnapshot memory newImplementationCustody =
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory newImplementationCustody =
             snapshotImplementationCustody(beforePreparation.configuration, expectedNewImplementation);
         LendingPoolV1_1 newImplementation = deployV11(config);
         vm.stopBroadcast();
@@ -147,10 +171,10 @@ contract UpgradeLendingPoolV1_1 is Script {
     function prepare(UpgradeConfig memory config) public returns (PreparedTransaction memory prepared) {
         validatePreUpgrade(config);
         UpgradeSnapshot memory beforePreparation = snapshot(config.lendingPoolProxy);
-        ImplementationCustodySnapshot memory oldImplementationCustody =
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory oldImplementationCustody =
             snapshotImplementationCustody(beforePreparation.configuration, config.expectedCurrentImplementation);
         address expectedNewImplementation = _nextDeploymentAddress(address(this));
-        ImplementationCustodySnapshot memory newImplementationCustody =
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory newImplementationCustody =
             snapshotImplementationCustody(beforePreparation.configuration, expectedNewImplementation);
 
         LendingPoolV1_1 newImplementation = deployV11(config);
@@ -223,11 +247,10 @@ contract UpgradeLendingPoolV1_1 is Script {
         state.custody = _snapshotCustody(lendingPoolProxy, state.configuration);
     }
 
-    function snapshotImplementationCustody(ConfigurationSnapshot memory config, address implementation)
-        public
-        view
-        returns (ImplementationCustodySnapshot memory custody)
-    {
+    function snapshotImplementationCustody(
+        LendingPoolV1_1UpgradeStateFingerprint.ConfigurationSnapshot memory config,
+        address implementation
+    ) public view returns (LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory custody) {
         custody.implementation = implementation;
         custody.collateralAssetBalance = _readBalance(config.collateralAsset, implementation);
         custody.debtAssetBalance = _readBalance(config.debtAsset, implementation);
@@ -256,6 +279,32 @@ contract UpgradeLendingPoolV1_1 is Script {
         return abi.encodeWithSelector(UUPSUpgradeable.upgradeToAndCall.selector, newImplementation, bytes(""));
     }
 
+    function calculateStateFingerprint(
+        uint256 chainId,
+        address expectedOldImplementation,
+        address expectedNewImplementation,
+        UpgradeSnapshot memory state,
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory oldImplementationCustody,
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory newImplementationCustody
+    ) public pure returns (bytes32) {
+        return LendingPoolV1_1UpgradeStateFingerprint.calculate(
+            LendingPoolV1_1UpgradeStateFingerprint.State({
+                chainId: chainId,
+                proxy: state.lendingPoolProxy,
+                expectedOldImplementation: expectedOldImplementation,
+                expectedNewImplementation: expectedNewImplementation,
+                legacySlots: state.legacySlots,
+                activeUpgradeAuthority: state.activeUpgradeAuthority,
+                pendingUpgradeAuthority: state.pendingUpgradeAuthority,
+                configuration: state.configuration,
+                accounting: state.accounting,
+                custody: state.custody,
+                oldImplementationCustody: oldImplementationCustody,
+                newImplementationCustody: newImplementationCustody
+            })
+        );
+    }
+
     function validatePreservedState(UpgradeSnapshot memory beforeUpgrade) public view {
         UpgradeSnapshot memory afterUpgrade = snapshot(beforeUpgrade.lendingPoolProxy);
 
@@ -281,8 +330,8 @@ contract UpgradeLendingPoolV1_1 is Script {
         UpgradeConfig memory config,
         UpgradeSnapshot memory beforePreparation,
         address newImplementation,
-        ImplementationCustodySnapshot memory oldImplementationCustody,
-        ImplementationCustodySnapshot memory newImplementationCustody
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory oldImplementationCustody,
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory newImplementationCustody
     ) internal view returns (PreparedTransaction memory prepared) {
         if (beforePreparation.lendingPoolProxy != config.lendingPoolProxy) {
             revert ProxyAddressChanged(config.lendingPoolProxy, beforePreparation.lendingPoolProxy);
@@ -306,6 +355,15 @@ contract UpgradeLendingPoolV1_1 is Script {
         _validateImplementationCustodyUnchanged(beforePreparation.configuration, oldImplementationCustody);
         _validateImplementationCustodyUnchanged(beforePreparation.configuration, newImplementationCustody);
 
+        bytes32 preUpgradeStateHash = calculateStateFingerprint(
+            config.expectedChainId,
+            config.expectedCurrentImplementation,
+            newImplementation,
+            beforePreparation,
+            oldImplementationCustody,
+            newImplementationCustody
+        );
+
         prepared = PreparedTransaction({
             proxy: config.lendingPoolProxy,
             expectedCurrentImplementation: config.expectedCurrentImplementation,
@@ -313,11 +371,16 @@ contract UpgradeLendingPoolV1_1 is Script {
             expectedUpgradeAuthority: config.expectedUpgradeAuthority,
             target: config.lendingPoolProxy,
             value: 0,
-            data: encodeUpgradeCall(newImplementation)
+            data: encodeUpgradeCall(newImplementation),
+            preUpgradeStateHash: preUpgradeStateHash
         });
     }
 
-    function _snapshotConfiguration(address proxy) internal view returns (ConfigurationSnapshot memory config) {
+    function _snapshotConfiguration(address proxy)
+        internal
+        view
+        returns (LendingPoolV1_1UpgradeStateFingerprint.ConfigurationSnapshot memory config)
+    {
         config.priceFeed = _readProxyAddress(proxy, ILendingPoolSnapshotView.priceFeed.selector);
         config.vault = _readProxyAddress(proxy, ILendingPoolSnapshotView.vault.selector);
         config.debtAsset = _readProxyAddress(proxy, ILendingPoolSnapshotView.debtAsset.selector);
@@ -331,7 +394,11 @@ contract UpgradeLendingPoolV1_1 is Script {
         config.borrowRateSlope = _readProxyUint(proxy, ILendingPoolSnapshotView.borrowRateSlope.selector);
     }
 
-    function _snapshotAccounting(address proxy) internal view returns (AccountingSnapshot memory accounting) {
+    function _snapshotAccounting(address proxy)
+        internal
+        view
+        returns (LendingPoolV1_1UpgradeStateFingerprint.AccountingSnapshot memory accounting)
+    {
         accounting.borrowIndex = _readProxyUint(proxy, ILendingPoolSnapshotView.borrowIndex.selector);
         accounting.lastBorrowIndexUpdate =
             _readProxyUint(proxy, ILendingPoolSnapshotView.lastBorrowIndexUpdate.selector);
@@ -341,10 +408,10 @@ contract UpgradeLendingPoolV1_1 is Script {
         accounting.totalScaledDebt = _readProxyUint(proxy, ILendingPoolSnapshotView.totalScaledDebt.selector);
     }
 
-    function _snapshotCustody(address proxy, ConfigurationSnapshot memory config)
+    function _snapshotCustody(address proxy, LendingPoolV1_1UpgradeStateFingerprint.ConfigurationSnapshot memory config)
         internal
         view
-        returns (CustodySnapshot memory custody)
+        returns (LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot memory custody)
     {
         custody.proxyDebtAssetBalance = _readBalance(config.debtAsset, proxy);
         custody.proxyVaultShareBalance = _readBalance(config.vault, proxy);
@@ -353,10 +420,10 @@ contract UpgradeLendingPoolV1_1 is Script {
         custody.vaultCollateralAssetBalance = _readBalance(config.collateralAsset, config.vault);
     }
 
-    function _validateConfiguration(ConfigurationSnapshot memory expected, ConfigurationSnapshot memory actual)
-        internal
-        pure
-    {
+    function _validateConfiguration(
+        LendingPoolV1_1UpgradeStateFingerprint.ConfigurationSnapshot memory expected,
+        LendingPoolV1_1UpgradeStateFingerprint.ConfigurationSnapshot memory actual
+    ) internal pure {
         _checkAddress("priceFeed", expected.priceFeed, actual.priceFeed);
         _checkAddress("vault", expected.vault, actual.vault);
         _checkAddress("debtAsset", expected.debtAsset, actual.debtAsset);
@@ -369,7 +436,10 @@ contract UpgradeLendingPoolV1_1 is Script {
         _checkUint("borrowRateSlope", expected.borrowRateSlope, actual.borrowRateSlope);
     }
 
-    function _validateAccounting(AccountingSnapshot memory expected, AccountingSnapshot memory actual) internal pure {
+    function _validateAccounting(
+        LendingPoolV1_1UpgradeStateFingerprint.AccountingSnapshot memory expected,
+        LendingPoolV1_1UpgradeStateFingerprint.AccountingSnapshot memory actual
+    ) internal pure {
         _checkUint("borrowIndex", expected.borrowIndex, actual.borrowIndex);
         _checkUint("lastBorrowIndexUpdate", expected.lastBorrowIndexUpdate, actual.lastBorrowIndexUpdate);
         _checkUint("totalCollateralShares", expected.totalCollateralShares, actual.totalCollateralShares);
@@ -377,7 +447,10 @@ contract UpgradeLendingPoolV1_1 is Script {
         _checkUint("totalScaledDebt", expected.totalScaledDebt, actual.totalScaledDebt);
     }
 
-    function _validateCustody(CustodySnapshot memory expected, CustodySnapshot memory actual) internal pure {
+    function _validateCustody(
+        LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot memory expected,
+        LendingPoolV1_1UpgradeStateFingerprint.CustodySnapshot memory actual
+    ) internal pure {
         _checkUint("proxyDebtBalance", expected.proxyDebtAssetBalance, actual.proxyDebtAssetBalance);
         _checkUint("proxyVaultShares", expected.proxyVaultShareBalance, actual.proxyVaultShareBalance);
         _checkUint("vaultTotalAssets", expected.vaultTotalAssets, actual.vaultTotalAssets);
@@ -395,8 +468,8 @@ contract UpgradeLendingPoolV1_1 is Script {
     }
 
     function _validateImplementationCustodyUnchanged(
-        ConfigurationSnapshot memory config,
-        ImplementationCustodySnapshot memory expected
+        LendingPoolV1_1UpgradeStateFingerprint.ConfigurationSnapshot memory config,
+        LendingPoolV1_1UpgradeStateFingerprint.ImplementationCustodySnapshot memory expected
     ) internal view {
         _checkImplementationCustodyBalance(
             expected.implementation,
@@ -537,5 +610,7 @@ contract UpgradeLendingPoolV1_1 is Script {
         console2.log("Value:", prepared.value);
         console2.log("Calldata:");
         console2.logBytes(prepared.data);
+        console2.log("Pre-upgrade state hash:");
+        console2.logBytes32(prepared.preUpgradeStateHash);
     }
 }
