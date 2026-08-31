@@ -66,6 +66,13 @@ contract UpgradeLendingPoolV1_1 is Script {
         uint256 vaultCollateralAssetBalance;
     }
 
+    struct ImplementationCustodySnapshot {
+        address implementation;
+        uint256 collateralAssetBalance;
+        uint256 debtAssetBalance;
+        uint256 vaultShareBalance;
+    }
+
     struct UpgradeSnapshot {
         address lendingPoolProxy;
         bytes32 implementationWord;
@@ -99,7 +106,10 @@ contract UpgradeLendingPoolV1_1 is Script {
     error VersionReadFailed(address lendingPoolProxy);
     error UnexpectedVersion(string actualVersion);
     error SnapshotValueChanged(bytes32 field, bytes32 expectedValue, bytes32 actualValue);
-    error ImplementationHasCustody(address implementation, address asset, uint256 balance);
+    error UnexpectedImplementationCustodySnapshot(address expectedImplementation, address actualImplementation);
+    error ImplementationCustodyBalanceChanged(
+        address implementation, address asset, uint256 expectedBalance, uint256 actualBalance
+    );
 
     bytes32 public constant ERC1967_IMPLEMENTATION_SLOT =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
@@ -109,14 +119,20 @@ contract UpgradeLendingPoolV1_1 is Script {
 
         validatePreUpgrade(config);
         UpgradeSnapshot memory beforeUpgrade = snapshot(config.lendingPoolProxy);
+        ImplementationCustodySnapshot memory oldImplementationCustody =
+            snapshotImplementationCustody(beforeUpgrade.configuration, config.expectedCurrentImplementation);
 
         vm.startBroadcast(config.expectedUpgradeAuthority);
         newImplementation = deployV11(config);
+        ImplementationCustodySnapshot memory newImplementationCustody =
+            snapshotImplementationCustody(beforeUpgrade.configuration, address(newImplementation));
         bytes memory callData = encodeUpgradeCall(address(newImplementation));
         _executeUpgrade(config.lendingPoolProxy, callData);
         vm.stopBroadcast();
 
-        validatePostUpgrade(config, beforeUpgrade, address(newImplementation));
+        validatePostUpgrade(
+            config, beforeUpgrade, address(newImplementation), oldImplementationCustody, newImplementationCustody
+        );
         _logUpgrade(config, address(newImplementation));
     }
 
@@ -183,6 +199,17 @@ contract UpgradeLendingPoolV1_1 is Script {
         state.custody = _snapshotCustody(lendingPoolProxy, state.configuration);
     }
 
+    function snapshotImplementationCustody(ConfigurationSnapshot memory config, address implementation)
+        public
+        view
+        returns (ImplementationCustodySnapshot memory custody)
+    {
+        custody.implementation = implementation;
+        custody.collateralAssetBalance = _readBalance(config.collateralAsset, implementation);
+        custody.debtAssetBalance = _readBalance(config.debtAsset, implementation);
+        custody.vaultShareBalance = _readBalance(config.vault, implementation);
+    }
+
     function deployV11(UpgradeConfig memory config) public returns (LendingPoolV1_1 newImplementation) {
         newImplementation = new LendingPoolV1_1();
         address implementation = address(newImplementation);
@@ -226,11 +253,18 @@ contract UpgradeLendingPoolV1_1 is Script {
     function validatePostUpgrade(
         UpgradeConfig memory config,
         UpgradeSnapshot memory beforeUpgrade,
-        address newImplementation
+        address newImplementation,
+        ImplementationCustodySnapshot memory oldImplementationCustody,
+        ImplementationCustodySnapshot memory newImplementationCustody
     ) public view {
         if (beforeUpgrade.lendingPoolProxy != config.lendingPoolProxy) {
             revert ProxyAddressChanged(config.lendingPoolProxy, beforeUpgrade.lendingPoolProxy);
         }
+
+        _validateImplementationCustodySnapshotAddress(
+            config.expectedCurrentImplementation, oldImplementationCustody.implementation
+        );
+        _validateImplementationCustodySnapshotAddress(newImplementation, newImplementationCustody.implementation);
 
         bytes32 expectedPreviousWord = _addressWord(config.expectedCurrentImplementation);
         if (beforeUpgrade.implementationWord != expectedPreviousWord) {
@@ -248,8 +282,8 @@ contract UpgradeLendingPoolV1_1 is Script {
 
         _validateVersion(config.lendingPoolProxy);
         validatePreservedState(beforeUpgrade);
-        _validateImplementationCustodyFree(beforeUpgrade.configuration, config.expectedCurrentImplementation);
-        _validateImplementationCustodyFree(beforeUpgrade.configuration, newImplementation);
+        _validateImplementationCustodyUnchanged(beforeUpgrade.configuration, oldImplementationCustody);
+        _validateImplementationCustodyUnchanged(beforeUpgrade.configuration, newImplementationCustody);
     }
 
     function _snapshotConfiguration(address proxy) internal view returns (ConfigurationSnapshot memory config) {
@@ -320,20 +354,47 @@ contract UpgradeLendingPoolV1_1 is Script {
         _checkUint("vaultCollateral", expected.vaultCollateralAssetBalance, actual.vaultCollateralAssetBalance);
     }
 
-    function _validateImplementationCustodyFree(ConfigurationSnapshot memory config, address implementation)
+    function _validateImplementationCustodySnapshotAddress(address expectedImplementation, address actualImplementation)
         internal
-        view
+        pure
     {
-        _checkCustodyBalance(
-            implementation, config.collateralAsset, _readBalance(config.collateralAsset, implementation)
-        );
-        _checkCustodyBalance(implementation, config.debtAsset, _readBalance(config.debtAsset, implementation));
-        _checkCustodyBalance(implementation, config.vault, _readBalance(config.vault, implementation));
+        if (actualImplementation != expectedImplementation) {
+            revert UnexpectedImplementationCustodySnapshot(expectedImplementation, actualImplementation);
+        }
     }
 
-    function _checkCustodyBalance(address implementation, address asset, uint256 balance) internal pure {
-        if (balance != 0) {
-            revert ImplementationHasCustody(implementation, asset, balance);
+    function _validateImplementationCustodyUnchanged(
+        ConfigurationSnapshot memory config,
+        ImplementationCustodySnapshot memory expected
+    ) internal view {
+        _checkImplementationCustodyBalance(
+            expected.implementation,
+            config.collateralAsset,
+            expected.collateralAssetBalance,
+            _readBalance(config.collateralAsset, expected.implementation)
+        );
+        _checkImplementationCustodyBalance(
+            expected.implementation,
+            config.debtAsset,
+            expected.debtAssetBalance,
+            _readBalance(config.debtAsset, expected.implementation)
+        );
+        _checkImplementationCustodyBalance(
+            expected.implementation,
+            config.vault,
+            expected.vaultShareBalance,
+            _readBalance(config.vault, expected.implementation)
+        );
+    }
+
+    function _checkImplementationCustodyBalance(
+        address implementation,
+        address asset,
+        uint256 expectedBalance,
+        uint256 actualBalance
+    ) internal pure {
+        if (actualBalance != expectedBalance) {
+            revert ImplementationCustodyBalanceChanged(implementation, asset, expectedBalance, actualBalance);
         }
     }
 
