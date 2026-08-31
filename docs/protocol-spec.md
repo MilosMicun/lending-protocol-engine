@@ -107,6 +107,10 @@ The primary objective of the protocol is to prevent bad debt and maintain system
 - totalCollateral += amount  
 - availableLiquidity += amount  
 
+LendingPool collateral deposits must revert atomically when the ERC-4626 vault returns zero shares. A reverted
+zero-share deposit must not transfer value or change protocol collateral accounting. Direct use of the generic
+CollateralVault remains outside this LendingPool-side guarantee.
+
 ---
 
 ### Borrow
@@ -151,4 +155,4 @@ The primary objective of the protocol is to prevent bad debt and maintain system
 ### Notes
 
 - This model assumes a simplified single-asset pool  
-- Interest accrual is out of scope and debt is treated as static  
+- Interest accrual is out of scope and debt is treated as static

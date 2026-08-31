@@ -54,6 +54,7 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     error InvalidInterestRateModel();
     error InvalidStalenessWindow();
     error ZeroAmount();
+    error ZeroCollateralShares();
     error InsufficientCollateral();
     error InsufficientLiquidity();
     error BorrowExceedsLimit();
@@ -232,6 +233,7 @@ contract LendingPool is Initializable, UUPSUpgradeable {
         collateralAsset.forceApprove(address(vault), amount);
 
         uint256 shares = vault.deposit(amount, address(this));
+        if (shares == 0) revert ZeroCollateralShares();
 
         collateralSharesOf[msg.sender] += shares;
         totalCollateralShares += shares;

@@ -151,6 +151,33 @@ contract LendingPoolTest is Test, LendingPoolProxyFixture {
         assertEq(vault.balanceOf(address(pool)), expectedShares);
     }
 
+    function test_DepositCollateralRevertsWhenVaultWouldMintZeroShares() public {
+        uint256 donationAmount = 1 ether;
+        uint256 depositAmount = 1;
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        assertGt(depositAmount, 0);
+        assertEq(vault.previewDeposit(depositAmount), 0);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+        uint256 vaultAssetsBefore = vault.totalAssets();
+        uint256 vaultSupplyBefore = vault.totalSupply();
+        uint256 userSharesBefore = pool.collateralSharesOf(user);
+        uint256 totalSharesBefore = pool.totalCollateralShares();
+
+        vm.prank(user);
+        vm.expectRevert(LendingPool.ZeroCollateralShares.selector);
+        pool.depositCollateral(depositAmount);
+
+        assertEq(asset.balanceOf(user), userBalanceBefore);
+        assertEq(vault.totalAssets(), vaultAssetsBefore);
+        assertEq(vault.totalSupply(), vaultSupplyBefore);
+        assertEq(pool.collateralSharesOf(user), userSharesBefore);
+        assertEq(pool.totalCollateralShares(), totalSharesBefore);
+    }
+
     function test_WithdrawCollateral_TransfersAssetsBackAndUpdatesAccounting() public {
         uint256 amount = 100 ether;
 
