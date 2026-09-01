@@ -135,7 +135,7 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
         uint256 balance = asset.balanceOf(address(pool));
         uint256 available = pool.availableLiquidity();
 
-        assertGe(balance + handler.successfulBorrows(), available);
+        assertGe(balance + handler.successfulBorrowCalls(), available);
     }
 
     function invariant_HealthyUsersCannotBeLiquidated() public {
@@ -151,5 +151,20 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
             vm.expectRevert(LendingPool.PositionNotLiquidatable.selector);
             pool.liquidate(user, debt);
         }
+    }
+
+    function afterInvariant() public view {
+        assertGt(handler.attemptedBorrowCalls(), 0);
+        assertGt(handler.successfulBorrowCalls(), 0);
+        assertGt(handler.attemptedLiquidationCalls(), 0);
+        assertGt(handler.successfulLiquidationCalls(), 0);
+
+        assertEq(
+            handler.successfulBorrowCalls() + handler.expectedRejectedBorrowCalls(), handler.attemptedBorrowCalls()
+        );
+        assertEq(
+            handler.successfulLiquidationCalls() + handler.expectedRejectedLiquidationCalls(),
+            handler.attemptedLiquidationCalls()
+        );
     }
 }
