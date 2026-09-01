@@ -84,6 +84,13 @@ The primary objective of the protocol is to prevent bad debt and maintain system
 - Liquidation incentive too low → no liquidators  
 - Rapid collateral price collapse → system enters BadDebt state  
 
+### Oracle Runtime Validation
+
+Phase 1 supports price feeds with 0–18 decimals. Accepted prices must be positive, nonzero after WAD
+normalization, non-future, and within the configured maximum-staleness window. Unsupported feed decimals and unsafe
+normalization states revert. Compatible collateral/debt token-unit assumptions remain a separate documented
+limitation and are not redesigned by this validation.
+
 ---
 
 ## 7. Accounting Model (Simplified One-Pool Model)
