@@ -60,6 +60,14 @@ The implementation intentionally prioritizes protocol mechanics and system reaso
 └──────────────────────────────────────────────────────────────┘
 ```
 
+`LendingPool` is used through an ERC-1967 proxy and is the only UUPS-upgradeable protocol contract.
+`CollateralVault` is deployed separately through its constructor and is not upgradeable. The `LendingPool`
+implementation constructor only disables initializers; deployment passes nonempty initialization calldata to the
+proxy constructor so the proxy is atomically initialized with the nine economic/dependency parameters and the
+tenth `initialUpgradeAuthority` parameter. The proxy is the canonical pool and holds pool state, debt-asset
+custody, collateral-vault shares, and pool-to-vault approvals. Implementation addresses are code targets only and
+must not receive protocol custody or approvals.
+
 ## Components
 
 | Contract | Responsibility |
@@ -357,13 +365,33 @@ Before deployment or configuration, the deployment operator and the reviewers ap
 
 # Security Properties
 
-## Checks → Effects → Interactions
+## External-call ordering and callbacks
 
-All state-mutating functions follow CEI ordering.
+External-call ordering is execution-path-specific; the implementation does not provide universal
+checks-effects-interactions ordering:
 
-External token transfers occur only after internal accounting updates complete.
+- `depositLiquidity()` calls the debt token before crediting liquidity accounting.
+- `depositCollateral()` calls the collateral token for `transferFrom` and approval, then calls
+  `CollateralVault.deposit()`, before crediting pool collateral-share accounting. The ERC-4626 deposit itself
+  transfers underlying assets before minting vault shares.
+- `withdrawCollateral()` performs external vault views and, when debt exists, oracle reads before calling
+  `CollateralVault.withdraw()`; only after that state-changing vault call returns does the pool reduce its share
+  accounting, followed by the final collateral-token transfer.
+- `borrow()` may checkpoint the borrow index before external vault/oracle reads, then records debt before the final
+  debt-token transfer. `withdrawLiquidity()` similarly reduces liquidity accounting before its final token
+  transfer.
+- `repay()` checkpoints the index and reduces debt before collecting debt tokens.
+- `liquidate()` may checkpoint the index before external oracle/vault reads, then reduces debt and collateral
+  accounting before collecting debt tokens and calling `CollateralVault.redeem()`. ERC-4626 withdrawal/redemption
+  burns vault shares before transferring underlying assets.
 
-This ordering reduces exposure to callback-based and hook-based reentrancy vectors.
+Oracle calls and ERC-4626 preview/conversion calls are external view calls. Solidity executes these calls in static
+context, but their position still matters when describing the complete execution path.
+
+The current production contracts have no reentrancy guard or equivalent lock. `SafeERC20` checks low-level ERC-20
+call success and accepts supported return-value conventions; it does not prevent token hooks, arbitrary callbacks,
+or reentrancy. Consequently, this documentation does not claim complete callback safety or protection from
+malicious tokens. Configured assets must satisfy the narrower [Phase 1 supported-asset boundary](#supported-erc-20-asset-boundary-phase-1).
 
 ---
 

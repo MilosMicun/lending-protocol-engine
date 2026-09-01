@@ -16,7 +16,15 @@ The primary objective of the protocol is to prevent bad debt and maintain system
 - **Borrower** — deposits collateral and takes debt  
 - **Liquidator** — repays unhealthy debt and seizes collateral for profit  
 - **Oracle** — provides asset prices used for risk calculations (passive infrastructure component)  
-- **Admin** — sets protocol parameters (LTV, liquidation threshold, liquidation bonus, oracle address)  
+- **Deployment operator** — supplies the economic and dependency configuration used by the one-time initializer;
+  the current implementation has no economic-parameter setters
+- **Active upgrade authority** — may authorize UUPS upgrades and nominate a replacement authority, but has no
+  function for changing the initialized economic configuration
+- **Pending upgrade authority** — may only accept its nomination; it has no active-authority power before acceptance
+
+The upgrade-authority transfer is two-step: the active authority proposes a nonzero pending address, and that
+address must accept before becoming active. Acceptance clears the pending nomination. The implementation has no
+authority-renunciation function and no transfer path to the zero address.
 
 ---
 
