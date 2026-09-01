@@ -97,6 +97,25 @@ These are the exact Solidity environment variables read by the three existing sc
 | `EXPECTED_PENDING_UPGRADE_AUTHORITY` | Expected pending authority, normally the zero-address sentinel. |
 | `EXPECTED_PRE_UPGRADE_STATE_HASH` | State hash emitted by the matching preparation run. |
 
+### Asset dependency preflight
+
+The canonical Phase 1 supported-asset boundary is defined in [Supported ERC-20 Asset Boundary (Phase 1)](../README.md#supported-erc-20-asset-boundary-phase-1). The deployment operator and dependency reviewers must complete this checklist before setting `COLLATERAL_ASSET` or `DEBT_ASSET` and before approving the V1 deployment:
+
+- [ ] confirm the network is Sepolia (`11155111`) and independently resolve each exact token address from the reviewed deployment record;
+- [ ] record whether each token is a repository-controlled testnet mock or an external dependency, and verify its name and symbol when those metadata functions are available;
+- [ ] fetch the deployed runtime bytecode at each address, record its hash, and match it to verified source or a reproducible repository build and deployment workflow;
+- [ ] read and record each token's decimals from the selected Sepolia contract;
+- [ ] establish with source/bytecode review and controlled transfer evidence that `transfer` and `transferFrom` debit the sender and credit the recipient by exactly the requested amount, with no fee, tax, burn, reflection, or recipient-side deduction;
+- [ ] cover both protocol directions for the debt asset (account to pool for liquidity deposits, repayments, and liquidations; pool to account for borrowing and liquidity withdrawals);
+- [ ] cover all protocol and vault directions for the collateral asset (account to pool, pool to vault, vault to pool or liquidator, and pool to withdrawing account);
+- [ ] establish with source/bytecode review and balance observations across the controlled demonstration window that neither token rebases nor changes balances autonomously;
+- [ ] verify the price feed's base/quote meaning and decimals, then demonstrate that `collateralRawAmount * priceWad / 1e18` produces debt-asset raw units for representative and boundary values; and
+- [ ] have the deployment operator and dependency reviewers sign off on the evidence record before broadcast.
+
+The deployment script's code-length and `balanceOf` probes do not prove these properties. Successful ERC-20 calls and matching decimals are also insufficient on their own. If any identity, bytecode, behavior, decimals, or unit evidence is missing or inconsistent, do not deploy with that dependency.
+
+This repository currently contains no verified public Sepolia collateral-asset or debt-asset address, metadata, decimals, or behavioral evidence. Those dependencies must remain pending until the later public deployment records the evidence below; placeholders and unverified external claims are not acceptable substitutes.
+
 ## 5. Commands
 
 Replace every angle-bracketed placeholder before running a command. `<SEPOLIA_RPC_URL_OR_ALIAS>` identifies the Sepolia endpoint. `<EXTERNAL_FOUNDRY_DEPLOYER_ACCOUNT>` is an account name from Foundry's external default keystore, not a key or mnemonic. These templates do not authorize a real run until the dependencies, values, and controlled window have been reviewed.
@@ -236,8 +255,15 @@ All fields below are **PENDING until the public Sepolia run occurs**. A placehol
 | Safe address and 2-of-2 threshold | `PENDING` |
 | Safe owner A address | `PENDING` |
 | Safe owner B address | `PENDING` |
-| Collateral-asset address | `PENDING` |
-| Debt-asset address | `PENDING` |
+| Collateral dependency: role, Sepolia address, name, symbol, decimals, and repository-controlled mock or external classification | `PENDING` |
+| Collateral dependency: deployed runtime bytecode hash and source/build/deployment identity evidence | `PENDING` |
+| Collateral dependency: exact-transfer evidence for account → pool → vault and vault → pool/liquidator or pool → account paths | `PENDING` |
+| Collateral dependency: non-rebasing and no-autonomous-balance-change evidence | `PENDING` |
+| Debt dependency: role, Sepolia address, name, symbol, decimals, and repository-controlled mock or external classification | `PENDING` |
+| Debt dependency: deployed runtime bytecode hash and source/build/deployment identity evidence | `PENDING` |
+| Debt dependency: exact-transfer evidence for account → pool and pool → account paths | `PENDING` |
+| Debt dependency: non-rebasing and no-autonomous-balance-change evidence | `PENDING` |
+| Collateral/debt decimals and oracle/token raw-unit compatibility calculation | `PENDING` |
 | Price-feed address | `PENDING` |
 | CollateralVault address | `PENDING` |
 | V1 implementation address | `PENDING` |

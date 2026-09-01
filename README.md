@@ -309,6 +309,25 @@ Health factor checks remain pure read paths by design. Coupling solvency reads w
 
 ---
 
+# Supported ERC-20 Asset Boundary (Phase 1)
+
+Phase 1 does not support arbitrary ERC-20 tokens. Both the configured collateral asset and debt asset must satisfy all of the following integration requirements:
+
+- `transfer` and `transferFrom` must have standard ERC-20 call behavior and must move exactly the requested amount: the sender is debited by that amount and the recipient is credited by that amount;
+- transfers must not charge fees or taxes, burn value, reflect value to holders, or apply any other sender-side or recipient-side deduction;
+- balances must not change autonomously through positive or negative rebasing; and
+- token raw units, token decimals, and the price feed's quotation must be compatible with the pool's existing accounting and oracle normalization.
+
+A successful ERC-20 call only shows that the call did not revert and returned an accepted value. It does not establish exact-transfer, non-rebasing, or unit compatibility. These requirements are an explicit deployment and asset-integration constraint; the contracts do not dynamically enforce them for every possible token implementation.
+
+The boundary follows from nominal accounting. The pool credits liquidity and shares, creates or clears debt, and calculates collateral seizure using requested amounts. The pool and the ERC-4626 vault do not reconcile those state changes against token balance deltas. A fee-on-transfer asset can therefore make recorded accounting exceed custody or make a recipient receive less than the protocol records. A rebasing asset can change custody without a matching accounting transition. Either case can invalidate solvency calculations and cause incorrect withdrawals, repayments, borrowing availability, or liquidation outcomes.
+
+Oracle answers are normalized to WAD, but collateral-token and debt-token raw units are not normalized against each other. The pool computes `collateralRawAmount * priceWad / 1e18` and compares the result directly with debt raw units. The selected token decimals and feed quotation must make that result a debt-asset raw-unit amount across the intended price range. With a conventional feed quoting whole debt tokens per whole collateral token, this ordinarily requires matching collateral and debt decimals; matching decimals alone does not prove compatibility.
+
+Before deployment or configuration, the deployment operator and the reviewers approving the asset dependencies must verify and retain evidence for contract identity, deployed bytecode, decimals, exact transfers in every direction used by the pool and vault, absence of rebasing or autonomous balance changes, and oracle/token unit compatibility. The operational checklist and the evidence required for the future Sepolia demonstration are in [`docs/SAFE_UPGRADE_RUNBOOK.md`](docs/SAFE_UPGRADE_RUNBOOK.md#asset-dependency-preflight).
+
+---
+
 # Security Properties
 
 ## Checks → Effects → Interactions
