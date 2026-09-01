@@ -29,10 +29,10 @@ Execute the demonstration in this order:
 4. Optionally execute a controlled representative V1 protocol flow through the proxy, retaining any state intended for preservation evidence.
 5. Run the V1.1 deploy-and-prepare script. It may broadcast only the V1.1 implementation deployment; it must not execute the proxy upgrade.
 6. Preserve the reported pre-upgrade state hash with the prepared target, value, calldata, and implementation address.
-7. Independently review the target, zero value, selector, arguments, chain, proxy, old and new implementations, active authority, and pending-authority sentinel.
-8. Submit the exact prepared transaction to the Safe.
-9. Obtain confirmations from both Safe owners.
-10. Execute the confirmed transaction through the Safe.
+7. Independently review the target, zero value, calldata, `CALL` operation (`0`), exact Safe nonce, chain, proxy, old and new implementations, active authority, and pending-authority sentinel.
+8. Submit the exact reviewed transaction to the Safe and record its exact cryptographic Safe transaction hash (`safeTxHash`) separately from any later Ethereum transaction hash.
+9. Obtain and record confirmations from both Safe owners for that exact `safeTxHash`, operation, and nonce.
+10. Execute the confirmed transaction through the Safe and separately record the executed Ethereum transaction hash.
 11. Run the independent read-only verifier immediately after execution.
 12. Record the public evidence listed in Section 9.
 
@@ -167,7 +167,7 @@ forge script script/UpgradeLendingPoolV1_1.s.sol:UpgradeLendingPoolV1_1 \
   -vvvv
 ```
 
-This command broadcasts only the V1.1 implementation deployment. Its output is the prepared Safe target, zero value, `upgradeToAndCall` calldata, new implementation address, and pre-upgrade state hash. Foundry does not execute the upgrade.
+This command broadcasts only the V1.1 implementation deployment. Its output is the proxy, expected current implementation, new implementation, expected upgrade authority, prepared Safe target, zero value, exact `upgradeToAndCall` calldata, and pre-upgrade state hash. Foundry does not execute the upgrade, submit a Safe proposal, impersonate the Safe, or supply or control its operation or nonce. Safe operation and nonce selection intentionally remain part of the external Safe workflow.
 
 ### Verify immediately after Safe execution
 
@@ -192,8 +192,14 @@ Before either Safe owner confirms, both reviewers must independently verify:
 
 - [ ] the connected network is Sepolia and the chain ID is `11155111`;
 - [ ] the submitting Safe address is the recorded official Safe and its threshold is 2-of-2;
-- [ ] the transaction target exactly equals the canonical `LendingPool` proxy;
-- [ ] the transaction value is exactly zero;
+- [ ] `to` exactly equals the canonical `LendingPool` proxy and the preparation output's target;
+- [ ] `value` is exactly `0`;
+- [ ] `data` exactly equals the complete prepared `upgradeToAndCall` calldata, byte for byte;
+- [ ] `operation` is `CALL`, with numeric operation value `0`;
+- [ ] the exact Safe nonce is recorded and matches both the Safe transaction proposed for confirmation and the Safe's applicable on-chain/current transaction state for execution;
+- [ ] both owner A and owner B have reviewed the exact `CALL (0)` operation and exact nonce before either owner confirms;
+- [ ] the exact cryptographic Safe transaction hash (`safeTxHash`) is independently derived for the reviewed Safe address and chain, `to`, `value`, `data`, `operation = CALL (0)`, exact nonce, and every other Safe transaction field that participates in the hash; and
+- [ ] both owner A and owner B confirm that exact `safeTxHash`, not merely a proposal or UI identifier;
 - [ ] the calldata selector is `upgradeToAndCall(address,bytes)` (`0x4f1ef286`);
 - [ ] the first argument exactly equals the prepared V1.1 implementation;
 - [ ] the second argument is empty bytes;
@@ -203,7 +209,26 @@ Before either Safe owner confirms, both reviewers must independently verify:
 - [ ] the prepared pre-upgrade state hash is recorded with the transaction evidence; and
 - [ ] the preparation checks validated the V1 and V1.1 implementation UUIDs and the V1.1 version.
 
-Any mismatch invalidates the review. Do not edit decoded arguments manually; discard the transaction and prepare it again from the reviewed inputs.
+`DELEGATECALL` (numeric operation value `1`) is prohibited: it would execute the calldata in the Safe's context rather than call the canonical `LendingPool` proxy. Any operation mismatch invalidates the proposal.
+
+Preparation intentionally does not fetch, guess, supply, or control the Safe nonce because proposal, confirmation, and execution remain external to the repository tooling. If the reviewed nonce becomes stale or conflicts with the Safe's applicable current transaction state, do not silently substitute another nonce after owner review. Regenerate the external Safe proposal with the applicable nonce, derive and record its new exact `safeTxHash`, and restart both-owner review before either owner confirms.
+
+A Safe Transaction Service proposal ID or UI identifier may be recorded as optional supplemental evidence, but it is not the cryptographic `safeTxHash` and must never replace it.
+
+Any mismatch invalidates the review. Do not edit decoded arguments, operation, or nonce silently; discard the mismatched Safe proposal and create a new external proposal from the reviewed preparation output and applicable Safe nonce.
+
+### Final execution-approval checkpoint
+
+Immediately before approving execution, both owners must complete this checkpoint against the exact Safe proposal. No pre-execution item below may remain `PENDING`; the `PENDING` values in Section 9 are only an uncompleted public-demonstration template.
+
+- [ ] `to`, `value`, and `data` match the reviewed preparation output exactly;
+- [ ] operation name `CALL` and numeric operation value `0` are recorded and unchanged;
+- [ ] the exact Safe nonce is recorded, unchanged from both-owner review, and still matches the Safe's applicable on-chain/current transaction state;
+- [ ] the exact `safeTxHash` derived from every reviewed hash-participating Safe transaction field is recorded;
+- [ ] owner A's confirmation and owner B's confirmation for this exact `safeTxHash`, operation, and nonce are separately recorded; and
+- [ ] both owners approve execution of this exact confirmed proposal.
+
+After execution, record the executed Ethereum transaction hash in its separate evidence field immediately. Do not use the `safeTxHash`, a Safe Transaction Service proposal ID, or a UI identifier as a substitute, and do not report the ceremony complete while the executed Ethereum transaction hash remains `PENDING`.
 
 ## 7. Fingerprint semantics
 
@@ -273,8 +298,14 @@ All fields below are **PENDING until the public Sepolia run occurs**. A placehol
 | V1.1 implementation address | `PENDING` |
 | V1.1 implementation-deployment transaction | `PENDING` |
 | Prepared target, value, and calldata | `PENDING` |
+| Safe operation name (`CALL`) | `PENDING` |
+| Safe operation numeric value (`0`) | `PENDING` |
+| Exact Safe nonce | `PENDING` |
 | Pre-upgrade state hash | `PENDING` |
-| Safe execution transaction | `PENDING` |
+| Exact Safe transaction hash (`safeTxHash`) | `PENDING` |
+| Safe owner A confirmation for the exact `safeTxHash`, operation, and nonce | `PENDING` |
+| Safe owner B confirmation for the exact `safeTxHash`, operation, and nonce | `PENDING` |
+| Executed Ethereum transaction hash | `PENDING` |
 | Read-only verifier output | `PENDING` |
 | Contract-verification links | `PENDING` |
 | Final full-suite result | `PENDING` |
