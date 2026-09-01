@@ -7,11 +7,10 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 
 import {LendingPool} from "../../src/core/lending/LendingPool.sol";
+import {CollateralVault} from "../../src/core/vault/CollateralVault.sol";
 
-// NOTE: This invariant handler intentionally covers the core lending lifecycle:
-// deposit liquidity, deposit collateral, borrow, repay, liquidate, and time progression.
-// Withdraw flows and multi-LP accounting are covered by unit/integration tests
-// and are outside this handler scope.
+// NOTE: Through the real proxy, this invariant handler covers liquidity and collateral deposits,
+// borrow/repay, liquidation, liquidity and collateral withdrawals, and multiple LP actors.
 contract LendingPoolHandler is Test {
     uint256 internal constant WAD = 1e18;
     uint256 internal constant BPS = 10_000;
@@ -29,6 +28,15 @@ contract LendingPoolHandler is Test {
     uint256 public attemptedLiquidationCalls;
     uint256 public successfulLiquidationCalls;
     uint256 public expectedRejectedLiquidationCalls;
+    uint256 public attemptedExternalLiquidityDepositCalls;
+    uint256 public successfulExternalLiquidityDepositCalls;
+    uint256 public distinctLiquidityProviders;
+    uint256 public attemptedLiquidityWithdrawalCalls;
+    uint256 public successfulLiquidityWithdrawalCalls;
+    uint256 public attemptedCollateralWithdrawalCalls;
+    uint256 public successfulCollateralWithdrawalCalls;
+
+    mapping(address => bool) public successfulLiquidityProvider;
 
     int256 internal immutable REFERENCE_PRICE;
     uint256 internal immutable REFERENCE_PRICE_WAD;
@@ -54,13 +62,24 @@ contract LendingPoolHandler is Test {
         return users.length;
     }
 
-    function depositLiquidity(uint256 amount) external {
+    function depositLiquidity(uint256 providerSeed, uint256 amount) external {
+        address provider = _getLiquidityProvider(providerSeed);
+
         amount = bound(amount, 1, 1_000 ether);
 
-        asset.mint(address(this), amount);
-        asset.approve(address(pool), amount);
+        asset.mint(provider, amount);
 
+        vm.startPrank(provider);
+        asset.approve(address(pool), amount);
+        attemptedExternalLiquidityDepositCalls++;
         pool.depositLiquidity(amount);
+        successfulExternalLiquidityDepositCalls++;
+        vm.stopPrank();
+
+        if (!successfulLiquidityProvider[provider]) {
+            successfulLiquidityProvider[provider] = true;
+            distinctLiquidityProviders++;
+        }
     }
 
     function depositCollateral(uint256 userSeed, uint256 amount) external {
@@ -114,6 +133,74 @@ contract LendingPoolHandler is Test {
         vm.stopPrank();
     }
 
+    function withdrawLiquidity(uint256 providerSeed, uint256 amount) external {
+        address provider = _getLiquidityProviderWithBalance(providerSeed);
+        if (provider == address(0)) return;
+
+        uint256 safeUpperBound = pool.liquidityBalanceOf(provider);
+        uint256 available = pool.availableLiquidity();
+        uint256 proxyBalance = asset.balanceOf(address(pool));
+
+        if (available < safeUpperBound) safeUpperBound = available;
+        if (proxyBalance < safeUpperBound) safeUpperBound = proxyBalance;
+        if (safeUpperBound == 0) return;
+
+        amount = bound(amount, 1, safeUpperBound);
+
+        uint256 providerLiquidityBefore = pool.liquidityBalanceOf(provider);
+        uint256 totalLiquidityBefore = pool.totalLiquidity();
+        uint256 providerBalanceBefore = asset.balanceOf(provider);
+        uint256 proxyBalanceBefore = asset.balanceOf(address(pool));
+
+        vm.startPrank(provider);
+        attemptedLiquidityWithdrawalCalls++;
+        pool.withdrawLiquidity(amount);
+        successfulLiquidityWithdrawalCalls++;
+        vm.stopPrank();
+
+        assertEq(pool.liquidityBalanceOf(provider), providerLiquidityBefore - amount);
+        assertEq(pool.totalLiquidity(), totalLiquidityBefore - amount);
+        assertEq(asset.balanceOf(provider), providerBalanceBefore + amount);
+        assertEq(asset.balanceOf(address(pool)), proxyBalanceBefore - amount);
+    }
+
+    function withdrawCollateral(uint256 userSeed, uint256 amount) external {
+        _setReferencePrice();
+
+        (address user, uint256 safeUpperBound) = _getUserWithWithdrawableCollateral(userSeed);
+        if (user == address(0)) return;
+
+        amount = bound(amount, 1, safeUpperBound);
+
+        CollateralVault collateralVault = pool.vault();
+        uint256 userCollateralAssetsBefore = pool.getCollateralAssets(user);
+        uint256 userCollateralSharesBefore = pool.collateralSharesOf(user);
+        uint256 totalCollateralSharesBefore = pool.totalCollateralShares();
+        uint256 userBalanceBefore = asset.balanceOf(user);
+        uint256 vaultAssetsBefore = collateralVault.totalAssets();
+        uint256 vaultSupplyBefore = collateralVault.totalSupply();
+        uint256 sharesConsumed = collateralVault.previewWithdraw(amount);
+
+        assertLe(sharesConsumed, userCollateralSharesBefore);
+        assertLe(amount, userCollateralAssetsBefore);
+
+        vm.startPrank(user);
+        attemptedCollateralWithdrawalCalls++;
+        pool.withdrawCollateral(amount);
+        successfulCollateralWithdrawalCalls++;
+        vm.stopPrank();
+
+        assertEq(pool.collateralSharesOf(user), userCollateralSharesBefore - sharesConsumed);
+        assertEq(pool.totalCollateralShares(), totalCollateralSharesBefore - sharesConsumed);
+        assertEq(asset.balanceOf(user), userBalanceBefore + amount);
+        assertEq(collateralVault.totalAssets(), vaultAssetsBefore - amount);
+        assertEq(collateralVault.totalSupply(), vaultSupplyBefore - sharesConsumed);
+
+        if (pool.debtBalanceOf(user) != 0) {
+            assertGe(pool.getHealthFactor(user), WAD);
+        }
+    }
+
     function liquidate(uint256 borrowerSeed, uint256 repayAmount) external {
         // The smallest valid oracle answer makes a bounded, debt-backed handler position unhealthy.
         priceFeed.setAnswer(1);
@@ -155,6 +242,90 @@ contract LendingPoolHandler is Test {
 
     function _getUser(uint256 seed) internal view returns (address) {
         return users[seed % users.length];
+    }
+
+    function _getLiquidityProvider(uint256 seed) internal view returns (address) {
+        uint256 start = seed % users.length;
+
+        if (distinctLiquidityProviders < users.length) {
+            for (uint256 i = 0; i < users.length; i++) {
+                address provider = users[(start + i) % users.length];
+                if (!successfulLiquidityProvider[provider]) return provider;
+            }
+        }
+
+        return users[start];
+    }
+
+    function _getLiquidityProviderWithBalance(uint256 seed) internal view returns (address) {
+        uint256 start = seed % users.length;
+
+        for (uint256 i = 0; i < users.length; i++) {
+            address provider = users[(start + i) % users.length];
+            if (pool.liquidityBalanceOf(provider) != 0) return provider;
+        }
+
+        return address(0);
+    }
+
+    function _getUserWithWithdrawableCollateral(uint256 seed) internal view returns (address, uint256) {
+        uint256 start = seed % users.length;
+
+        for (uint256 i = 0; i < users.length; i++) {
+            address user = users[(start + i) % users.length];
+            uint256 safeUpperBound = _safeCollateralWithdrawalBound(user);
+            if (safeUpperBound != 0) return (user, safeUpperBound);
+        }
+
+        return (address(0), 0);
+    }
+
+    function _safeCollateralWithdrawalBound(address user) internal view returns (uint256) {
+        uint256 userShares = pool.collateralSharesOf(user);
+        if (userShares == 0) return 0;
+
+        CollateralVault collateralVault = pool.vault();
+        uint256 userAssets = pool.getCollateralAssets(user);
+        if (userAssets == 0) return 0;
+
+        uint256 safeUpperBound = userAssets;
+        uint256 vaultMaximum = collateralVault.maxWithdraw(address(pool));
+        if (vaultMaximum < safeUpperBound) safeUpperBound = vaultMaximum;
+
+        uint256 debt = pool.debtBalanceOf(user);
+        if (debt != 0) {
+            uint256 minimumCollateralValue = _ceilDiv(debt * BPS, pool.liquidationThresholdBps());
+            uint256 minimumCollateralAssets = _ceilDiv(minimumCollateralValue * WAD, REFERENCE_PRICE_WAD);
+
+            // Retain one asset unit beyond the exact inverse of the production health-factor floors.
+            if (userAssets <= minimumCollateralAssets + 1) return 0;
+
+            uint256 healthBound = userAssets - minimumCollateralAssets - 1;
+            if (healthBound < safeUpperBound) safeUpperBound = healthBound;
+        }
+
+        return _capToPreviewWithdrawShares(collateralVault, userShares, safeUpperBound);
+    }
+
+    function _capToPreviewWithdrawShares(CollateralVault collateralVault, uint256 userShares, uint256 upperBound)
+        internal
+        view
+        returns (uint256)
+    {
+        if (collateralVault.previewWithdraw(upperBound) <= userShares) return upperBound;
+
+        uint256 lowerBound;
+        while (lowerBound < upperBound) {
+            uint256 midpoint = lowerBound + (upperBound - lowerBound + 1) / 2;
+
+            if (collateralVault.previewWithdraw(midpoint) <= userShares) {
+                lowerBound = midpoint;
+            } else {
+                upperBound = midpoint - 1;
+            }
+        }
+
+        return lowerBound;
     }
 
     function _getLiquidatableBorrower(uint256 seed) internal view returns (address) {
@@ -226,6 +397,7 @@ contract LendingPoolHandler is Test {
 
     function _setReferencePrice() internal {
         priceFeed.setAnswer(REFERENCE_PRICE);
+        priceFeed.setUpdatedAt(block.timestamp);
     }
 
     function _ceilDiv(uint256 numerator, uint256 denominator) internal pure returns (uint256) {

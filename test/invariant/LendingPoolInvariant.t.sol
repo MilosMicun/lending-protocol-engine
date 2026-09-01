@@ -110,10 +110,14 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
         assertEq(pool.totalCollateralShares(), sum);
     }
 
-    function invariant_TotalLiquidityEqualsSingleHandlerLiquidityBalance() public view {
-        // NOTE: The invariant handler uses a single LP: address(handler).
-        // If multi-LP handler actions are added later, this invariant must be generalized.
-        assertEq(pool.totalLiquidity(), pool.liquidityBalanceOf(address(handler)));
+    function invariant_TotalLiquidityEqualsSumOfTrackedProviderBalances() public view {
+        uint256 sum = pool.liquidityBalanceOf(address(handler));
+
+        for (uint256 i = 0; i < handler.userCount(); i++) {
+            sum += pool.liquidityBalanceOf(handler.users(i));
+        }
+
+        assertEq(pool.totalLiquidity(), sum);
     }
 
     function invariant_BorrowIndexNeverDecreases() public view {
@@ -158,6 +162,13 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
         assertGt(handler.successfulBorrowCalls(), 0);
         assertGt(handler.attemptedLiquidationCalls(), 0);
         assertGt(handler.successfulLiquidationCalls(), 0);
+        assertGe(handler.attemptedExternalLiquidityDepositCalls(), 2);
+        assertEq(handler.successfulExternalLiquidityDepositCalls(), handler.attemptedExternalLiquidityDepositCalls());
+        assertGe(handler.distinctLiquidityProviders(), 2);
+        assertGt(handler.attemptedLiquidityWithdrawalCalls(), 0);
+        assertEq(handler.successfulLiquidityWithdrawalCalls(), handler.attemptedLiquidityWithdrawalCalls());
+        assertGt(handler.attemptedCollateralWithdrawalCalls(), 0);
+        assertEq(handler.successfulCollateralWithdrawalCalls(), handler.attemptedCollateralWithdrawalCalls());
 
         assertEq(
             handler.successfulBorrowCalls() + handler.expectedRejectedBorrowCalls(), handler.attemptedBorrowCalls()
