@@ -189,7 +189,53 @@ contract LendingPoolFuzzTest is Test, LendingPoolProxyFixture {
         assertEq(asset.balanceOf(user), userBalanceBefore - borrowAmount);
     }
 
-    function testFuzz_RepayAfterAccrual_ReducesDebtButDoesNotUnderflow(
+    function test_RepayAfterAccrual_ZeroScaledRepaymentTransfersTokensWithoutReducingDebt() public {
+        uint256 liquidityAmount = 1_000 ether;
+        uint256 collateralAmount = 100 ether;
+        uint256 borrowAmount = 50 ether;
+        uint256 repayAmount = 1;
+
+        vm.prank(lp);
+        pool.depositLiquidity(liquidityAmount);
+
+        vm.prank(user);
+        pool.depositCollateral(collateralAmount);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        vm.warp(block.timestamp + 1 days);
+
+        uint256 accruedBorrowIndex = pool.currentBorrowIndex();
+        uint256 scaledDebtBefore = pool.scaledDebtOf(user);
+        uint256 totalScaledDebtBefore = pool.totalScaledDebt();
+        uint256 debtBefore = pool.debtBalanceOf(user);
+        uint256 userBalanceBefore = asset.balanceOf(user);
+        uint256 poolBalanceBefore = asset.balanceOf(address(pool));
+        uint256 expectedScaledRepay = repayAmount * WAD / accruedBorrowIndex;
+
+        assertGt(repayAmount, 0);
+        assertLt(repayAmount, debtBefore);
+        assertGt(accruedBorrowIndex, WAD);
+        assertEq(expectedScaledRepay, 0);
+
+        vm.prank(user);
+        pool.repay(repayAmount);
+
+        uint256 debtAfter = pool.debtBalanceOf(user);
+        uint256 scaledDebtAfter = pool.scaledDebtOf(user);
+
+        assertEq(pool.borrowIndex(), accruedBorrowIndex);
+        assertEq(asset.balanceOf(user), userBalanceBefore - repayAmount);
+        assertEq(asset.balanceOf(address(pool)), poolBalanceBefore + repayAmount);
+        assertEq(scaledDebtAfter, scaledDebtBefore);
+        assertEq(pool.totalScaledDebt(), totalScaledDebtBefore);
+        assertEq(debtAfter, debtBefore);
+
+        // Exact equality above proves that the former non-strict assertions would have passed without a reduction.
+    }
+
+    function testFuzz_RepayAfterAccrual_MatchesScaledRoundingAndDoesNotUnderflow(
         uint256 borrowAmount,
         uint256 repayAmount,
         uint256 timeElapsed
@@ -214,29 +260,51 @@ contract LendingPoolFuzzTest is Test, LendingPoolProxyFixture {
         vm.warp(block.timestamp + timeElapsed);
         priceFeed.setUpdatedAt(block.timestamp);
 
+        uint256 accruedBorrowIndex = pool.currentBorrowIndex();
         uint256 debtBefore = pool.debtBalanceOf(user);
         uint256 scaledDebtBefore = pool.scaledDebtOf(user);
+        uint256 totalScaledDebtBefore = pool.totalScaledDebt();
 
         assertGt(debtBefore, borrowAmount);
 
         repayAmount = bound(repayAmount, 1, debtBefore);
+
+        uint256 expectedScaledRepay = repayAmount * WAD / accruedBorrowIndex;
+        uint256 userBalanceBefore = asset.balanceOf(user);
+        uint256 poolBalanceBefore = asset.balanceOf(address(pool));
 
         vm.prank(user);
         pool.repay(repayAmount);
 
         uint256 debtAfter = pool.debtBalanceOf(user);
 
-        assertLe(debtAfter, debtBefore);
-        assertLe(pool.scaledDebtOf(user), scaledDebtBefore);
+        assertEq(pool.borrowIndex(), accruedBorrowIndex);
+        assertEq(asset.balanceOf(user), userBalanceBefore - repayAmount);
+        assertEq(asset.balanceOf(address(pool)), poolBalanceBefore + repayAmount);
         assertEq(pool.totalDebt(), debtAfter);
         assertEq(pool.availableLiquidity(), liquidityAmount - debtAfter);
 
         if (repayAmount == debtBefore) {
             assertEq(pool.scaledDebtOf(user), 0);
             assertEq(pool.totalScaledDebt(), 0);
+            assertLt(pool.scaledDebtOf(user), scaledDebtBefore);
+            assertLt(pool.totalScaledDebt(), totalScaledDebtBefore);
+            assertLt(debtAfter, debtBefore);
         } else {
             assertGt(pool.scaledDebtOf(user), 0);
             assertGt(pool.totalScaledDebt(), 0);
+
+            if (expectedScaledRepay == 0) {
+                assertEq(pool.scaledDebtOf(user), scaledDebtBefore);
+                assertEq(pool.totalScaledDebt(), totalScaledDebtBefore);
+                assertEq(debtAfter, debtBefore);
+            } else {
+                assertEq(pool.scaledDebtOf(user), scaledDebtBefore - expectedScaledRepay);
+                assertEq(pool.totalScaledDebt(), totalScaledDebtBefore - expectedScaledRepay);
+                assertLt(pool.scaledDebtOf(user), scaledDebtBefore);
+                assertLt(pool.totalScaledDebt(), totalScaledDebtBefore);
+                assertLt(debtAfter, debtBefore);
+            }
         }
     }
 
