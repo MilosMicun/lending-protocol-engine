@@ -249,10 +249,11 @@ contract LendingPool is Initializable, UUPSUpgradeable {
         uint256 collateral = collateralSharesOf[msg.sender];
         if (collateral < sharesNeeded) revert InsufficientCollateral();
 
-        uint256 remainingCollateralAssets = getCollateralAssets(msg.sender) - amount;
         uint256 debt = debtBalanceOf(msg.sender);
 
         if (debt != 0) {
+            uint256 remainingShares = collateral - sharesNeeded;
+            uint256 remainingCollateralAssets = vault.convertToAssets(remainingShares);
             uint256 priceWad = OracleLib.getFreshPriceWad(priceFeed, maxPriceStaleness);
             uint256 remainingCollateralValue = remainingCollateralAssets * priceWad / WAD;
 

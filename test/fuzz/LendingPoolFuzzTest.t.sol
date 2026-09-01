@@ -122,6 +122,56 @@ contract LendingPoolFuzzTest is Test, LendingPoolProxyFixture {
         pool.borrow(borrowAmount);
     }
 
+    function testFuzz_WithdrawCollateral_SuccessLeavesPositionHealthyAfterDonation(
+        uint256 depositAmount,
+        uint256 donationAmount,
+        uint256 borrowAmount,
+        uint256 withdrawAmount
+    ) public {
+        depositAmount = bound(depositAmount, 1, 1_000);
+        donationAmount = bound(donationAmount, 3, 1_000);
+
+        vm.prank(lp);
+        pool.depositLiquidity(10_000);
+
+        vm.prank(user);
+        pool.depositCollateral(depositAmount);
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        uint256 maxBorrow = pool.maxBorrowOf(user);
+        borrowAmount = bound(borrowAmount, 1, maxBorrow);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        uint256 userSharesBefore = pool.collateralSharesOf(user);
+        uint256 userAssetsBefore = vault.convertToAssets(userSharesBefore);
+        withdrawAmount = bound(withdrawAmount, 1, userAssetsBefore);
+        uint256 sharesNeeded = vault.previewWithdraw(withdrawAmount);
+
+        vm.prank(user);
+        try pool.withdrawCollateral(withdrawAmount) {
+            uint256 remainingShares = pool.collateralSharesOf(user);
+            uint256 remainingAssets = vault.convertToAssets(remainingShares);
+            uint256 remainingValue = remainingAssets;
+            uint256 adjustedRemainingValue = remainingValue * LIQUIDATION_THRESHOLD_BPS / BPS;
+            uint256 expectedHealthFactor = adjustedRemainingValue * WAD / borrowAmount;
+
+            assertEq(remainingShares, userSharesBefore - sharesNeeded);
+            assertEq(pool.getCollateralAssets(user), remainingAssets);
+            assertEq(pool.getHealthFactor(user), expectedHealthFactor);
+            assertGe(expectedHealthFactor, WAD);
+        } catch (bytes memory reason) {
+            bytes4 selector;
+            assembly {
+                selector := mload(add(reason, 0x20))
+            }
+            assertEq(selector, LendingPool.HealthFactorTooLow.selector);
+        }
+    }
+
     function testFuzz_Repay_ReducesDebtCorrectly(uint256 borrowAmount, uint256 repayAmount) public {
         uint256 liquidityAmount = 1_000 ether;
         uint256 collateralAmount = 100 ether;

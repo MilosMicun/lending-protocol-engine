@@ -231,6 +231,139 @@ contract LendingPoolTest is Test, LendingPoolProxyFixture {
         pool.withdrawCollateral(withdrawAmount);
     }
 
+    function test_WithdrawCollateral_RevertsWhenShareRoundingWouldLeaveDebtWithoutCollateral() public {
+        uint256 depositAmount = 1;
+        uint256 donationAmount = 6;
+        uint256 borrowAmount = 2;
+        uint256 withdrawAmount = 1;
+
+        vm.prank(lp);
+        pool.depositLiquidity(10);
+
+        vm.prank(user);
+        pool.depositCollateral(depositAmount);
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        uint256 userShares = pool.collateralSharesOf(user);
+        uint256 sharesNeeded = vault.previewWithdraw(withdrawAmount);
+        uint256 preWithdrawAssets = vault.convertToAssets(userShares);
+        uint256 estimatedRemainingAssets = preWithdrawAssets - withdrawAmount;
+        uint256 actualRemainingAssets = vault.convertToAssets(userShares - sharesNeeded);
+
+        assertEq(userShares, 1);
+        assertEq(preWithdrawAssets, 4);
+        assertEq(sharesNeeded, userShares);
+        assertEq(estimatedRemainingAssets, 3);
+        assertEq(actualRemainingAssets, 0);
+        assertNotEq(estimatedRemainingAssets, actualRemainingAssets);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+        uint256 poolBalanceBefore = asset.balanceOf(address(pool));
+        uint256 vaultAssetsBefore = vault.totalAssets();
+        uint256 vaultSupplyBefore = vault.totalSupply();
+        uint256 totalCollateralSharesBefore = pool.totalCollateralShares();
+        uint256 userDebtBefore = pool.debtBalanceOf(user);
+        uint256 totalScaledDebtBefore = pool.totalScaledDebt();
+        uint256 totalLiquidityBefore = pool.totalLiquidity();
+
+        vm.prank(user);
+        vm.expectRevert(LendingPool.HealthFactorTooLow.selector);
+        pool.withdrawCollateral(withdrawAmount);
+
+        assertEq(pool.collateralSharesOf(user), userShares);
+        assertEq(pool.totalCollateralShares(), totalCollateralSharesBefore);
+        assertEq(pool.debtBalanceOf(user), userDebtBefore);
+        assertEq(pool.totalScaledDebt(), totalScaledDebtBefore);
+        assertEq(pool.totalLiquidity(), totalLiquidityBefore);
+        assertEq(asset.balanceOf(user), userBalanceBefore);
+        assertEq(asset.balanceOf(address(pool)), poolBalanceBefore);
+        assertEq(vault.totalAssets(), vaultAssetsBefore);
+        assertEq(vault.totalSupply(), vaultSupplyBefore);
+        assertEq(vault.balanceOf(address(pool)), userShares);
+    }
+
+    function test_WithdrawCollateral_SafePartialWithdrawalSucceedsAfterDonation() public {
+        uint256 depositAmount = 10;
+        uint256 donationAmount = 10;
+        uint256 borrowAmount = 5;
+        uint256 withdrawAmount = 2;
+
+        vm.prank(lp);
+        pool.depositLiquidity(20);
+
+        vm.prank(user);
+        pool.depositCollateral(depositAmount);
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        uint256 userSharesBefore = pool.collateralSharesOf(user);
+        uint256 sharesNeeded = vault.previewWithdraw(withdrawAmount);
+        uint256 userAssetsBefore = vault.convertToAssets(userSharesBefore);
+        uint256 remainingAssetsBefore = vault.convertToAssets(userSharesBefore - sharesNeeded);
+
+        assertEq(userSharesBefore, 10);
+        assertEq(userAssetsBefore, 19);
+        assertNotEq(userAssetsBefore, userSharesBefore);
+        assertEq(sharesNeeded, 2);
+        assertEq(remainingAssetsBefore, 15);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+
+        vm.prank(user);
+        pool.withdrawCollateral(withdrawAmount);
+
+        uint256 remainingShares = userSharesBefore - sharesNeeded;
+        uint256 remainingAssetsAfter = vault.convertToAssets(remainingShares);
+
+        assertEq(pool.collateralSharesOf(user), remainingShares);
+        assertEq(pool.totalCollateralShares(), remainingShares);
+        assertEq(asset.balanceOf(user), userBalanceBefore + withdrawAmount);
+        assertEq(pool.debtBalanceOf(user), borrowAmount);
+        assertEq(pool.getCollateralAssets(user), remainingAssetsAfter);
+        assertGe(remainingAssetsAfter, remainingAssetsBefore);
+        assertGe(pool.getHealthFactor(user), WAD);
+    }
+
+    function test_WithdrawCollateral_DebtFreeUserCanWithdrawAfterDonation() public {
+        uint256 depositAmount = 1;
+        uint256 donationAmount = 6;
+        uint256 withdrawAmount = 1;
+
+        vm.prank(user);
+        pool.depositCollateral(depositAmount);
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        uint256 userShares = pool.collateralSharesOf(user);
+        uint256 userAssets = vault.convertToAssets(userShares);
+        uint256 sharesNeeded = vault.previewWithdraw(withdrawAmount);
+        uint256 userBalanceBefore = asset.balanceOf(user);
+
+        assertEq(pool.debtBalanceOf(user), 0);
+        assertEq(userShares, 1);
+        assertEq(userAssets, 4);
+        assertNotEq(userAssets, userShares);
+        assertEq(sharesNeeded, userShares);
+
+        vm.prank(user);
+        pool.withdrawCollateral(withdrawAmount);
+
+        assertEq(pool.collateralSharesOf(user), 0);
+        assertEq(pool.totalCollateralShares(), 0);
+        assertEq(vault.balanceOf(address(pool)), 0);
+        assertEq(asset.balanceOf(user), userBalanceBefore + withdrawAmount);
+    }
+
     /*//////////////////////////////////////////////////////////////
                             LIQUIDITY TESTS
     //////////////////////////////////////////////////////////////*/
