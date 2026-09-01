@@ -273,10 +273,10 @@ contract LendingPool is Initializable, UUPSUpgradeable {
 
     function depositLiquidity(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
-        // NOTE: The borrow index is not updated here intentionally.
-        // Interest accrues on the next debt-mutating action: borrow, repay, or liquidate.
-        // A large liquidity deposit between accruals may slightly undercharge borrowers
-        // for the previous period because utilization is recalculated with the new liquidity.
+        // NOTE: depositLiquidity does not checkpoint the stored borrowIndex.
+        // currentBorrowIndex() computes elapsed growth from lastBorrowIndexUpdate using utilization
+        // derived from the current totalLiquidity, so this deposit can lower the rate applied to
+        // the entire uncheckpointed interval. borrow, repay, and liquidate checkpoint the result.
         debtAsset.safeTransferFrom(msg.sender, address(this), amount);
 
         liquidityBalanceOf[msg.sender] += amount;
