@@ -10,6 +10,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {LendingPool} from "../src/core/lending/LendingPool.sol";
 import {CollateralVault} from "../src/core/vault/CollateralVault.sol";
 import {IPriceFeed} from "../src/interfaces/IPriceFeed.sol";
+import {OracleLib} from "../src/lib/OracleLib.sol";
 
 interface ILendingPoolDeploymentView {
     function priceFeed() external view returns (address);
@@ -160,6 +161,7 @@ contract DeployLendingPoolV1 is Script {
         _probeErc20(config.collateralAsset);
         _probeErc20(config.debtAsset);
         _probePriceFeed(config.priceFeed);
+        OracleLib.getFreshPriceWad(IPriceFeed(config.priceFeed), config.maxPriceStaleness);
     }
 
     function validateDeployment(

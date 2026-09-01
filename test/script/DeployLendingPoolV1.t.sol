@@ -12,6 +12,7 @@ import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 
 import {LendingPool} from "../../src/core/lending/LendingPool.sol";
 import {CollateralVault} from "../../src/core/vault/CollateralVault.sol";
+import {OracleLib} from "../../src/lib/OracleLib.sol";
 
 contract IncompatibleDependency {}
 
@@ -279,6 +280,50 @@ contract DeployLendingPoolV1Test is Test {
                 bytes4(keccak256("decimals()"))
             )
         );
+    }
+
+    function test_NineteenDecimalOracleWithPositiveDustAnswerRevertsBeforeAnyDeployment() public {
+        MockV3Aggregator unsupportedPriceFeed = new MockV3Aggregator(19, 1, block.timestamp);
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.priceFeed = address(unsupportedPriceFeed);
+
+        _expectInvalidConfig(config, abi.encodeWithSelector(OracleLib.UnsupportedPriceFeedDecimals.selector, uint8(19)));
+    }
+
+    function test_SeventyEightDecimalOracleRevertsBeforeAnyDeployment() public {
+        MockV3Aggregator unsupportedPriceFeed = new MockV3Aggregator(78, 1, block.timestamp);
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.priceFeed = address(unsupportedPriceFeed);
+
+        _expectInvalidConfig(config, abi.encodeWithSelector(OracleLib.UnsupportedPriceFeedDecimals.selector, uint8(78)));
+    }
+
+    function test_FutureOracleTimestampRevertsBeforeAnyDeployment() public {
+        uint256 futureUpdatedAt = block.timestamp + 1;
+        MockV3Aggregator futurePriceFeed = new MockV3Aggregator(8, 1e8, futureUpdatedAt);
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.priceFeed = address(futurePriceFeed);
+
+        _expectInvalidConfig(
+            config, abi.encodeWithSelector(OracleLib.FuturePriceTimestamp.selector, futureUpdatedAt, block.timestamp)
+        );
+    }
+
+    function test_OracleNormalizationOverflowRevertsBeforeAnyDeployment() public {
+        MockV3Aggregator overflowingPriceFeed = new MockV3Aggregator(0, type(int256).max, block.timestamp);
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.priceFeed = address(overflowingPriceFeed);
+
+        _expectInvalidConfig(config, abi.encodeWithSelector(OracleLib.PriceNormalizationOverflow.selector));
+    }
+
+    function test_StaleOracleRoundRevertsBeforeAnyDeployment() public {
+        vm.warp(MAX_PRICE_STALENESS + 2);
+        MockV3Aggregator stalePriceFeed = new MockV3Aggregator(8, 1e8, block.timestamp - MAX_PRICE_STALENESS - 1);
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.priceFeed = address(stalePriceFeed);
+
+        _expectInvalidConfig(config, abi.encodeWithSelector(OracleLib.StalePrice.selector));
     }
 
     function test_PostDeploymentReadbackRejectsMismatchedArtifacts() public {
