@@ -143,6 +143,10 @@ The vault treats:
 
 This distinction becomes critical once vault exchange rates diverge over time.
 
+`LendingPool.depositCollateral()` rejects a nonzero deposit if the vault returns zero shares. The transaction
+reverts atomically with `ZeroCollateralShares`, so the user's token balance, vault assets and supply, and pool
+collateral-share accounting remain unchanged.
+
 ## Liquidation Rounding Safety
 
 Liquidation paths intentionally use `previewWithdraw()` (ceiling rounding).
@@ -316,26 +320,31 @@ All price reads pass through:
 OracleLib.getFreshPriceWad()
 ```
 
-The library performs three validations:
+The library requires a positive answer, a nonzero timestamp that is not in the future, a timestamp within the
+configured maximum-staleness window, and `answeredInRound >= roundId`. It does not apply additional round-data
+checks beyond that enforced relationship.
 
-1. Invalid price check
-2. Staleness check
-3. Invalid round detection
-
-All oracle values are normalized to WAD precision regardless of feed decimals.
+Feeds with 0–18 decimals are supported. Their positive answers are scaled to WAD precision; unsupported decimal
+counts revert, multiplication is prechecked and reverts on normalization overflow, and a zero normalized result
+is rejected.
 
 ## Oracle Safety Checks
 
 ```solidity
 if (answer <= 0) revert InvalidPrice();
-
-if (
-    updatedAt == 0 ||
-    block.timestamp - updatedAt > maxStaleness
-) revert StalePrice();
-
-if (answeredInRound < roundId)
-    revert InvalidRound();
+if (updatedAt == 0) revert StalePrice();
+if (updatedAt > block.timestamp) revert FuturePriceTimestamp(updatedAt, block.timestamp);
+if (block.timestamp - updatedAt > maxStaleness) revert StalePrice();
+if (answeredInRound < roundId) revert InvalidRound();
+if (feedDecimals > 18) revert UnsupportedPriceFeedDecimals(feedDecimals);
+if (feedDecimals < 18) {
+    uint256 scale = 10 ** (18 - feedDecimals);
+    if (price > type(uint256).max / scale) revert PriceNormalizationOverflow();
+    normalizedPrice = price * scale;
+} else {
+    normalizedPrice = price;
+}
+if (normalizedPrice == 0) revert ZeroNormalizedPrice();
 ```
 
 Oracle freshness is treated as a solvency requirement, not a UI concern.
@@ -357,7 +366,7 @@ A successful ERC-20 call only shows that the call did not revert and returned an
 
 The boundary follows from nominal accounting. The pool credits liquidity and shares, creates or clears debt, and calculates collateral seizure using requested amounts. The pool and the ERC-4626 vault do not reconcile those state changes against token balance deltas. A fee-on-transfer asset can therefore make recorded accounting exceed custody or make a recipient receive less than the protocol records. A rebasing asset can change custody without a matching accounting transition. Either case can invalidate solvency calculations and cause incorrect withdrawals, repayments, borrowing availability, or liquidation outcomes.
 
-Oracle answers are normalized to WAD, but collateral-token and debt-token raw units are not normalized against each other. The pool computes `collateralRawAmount * priceWad / 1e18` and compares the result directly with debt raw units. The selected token decimals and feed quotation must make that result a debt-asset raw-unit amount across the intended price range. With a conventional feed quoting whole debt tokens per whole collateral token, this ordinarily requires matching collateral and debt decimals; matching decimals alone does not prove compatibility.
+Accepted oracle answers are normalized to WAD, but collateral-token and debt-token raw units are not normalized against each other. The pool computes `collateralRawAmount * priceWad / 1e18` and compares the result directly with debt raw units. The selected token decimals and feed quotation must make that result a debt-asset raw-unit amount across the intended price range. With a conventional feed quoting whole debt tokens per whole collateral token, this ordinarily requires matching collateral and debt decimals; matching decimals alone does not prove compatibility.
 
 Before deployment or configuration, the deployment operator and the reviewers approving the asset dependencies must verify and retain evidence for contract identity, deployed bytecode, decimals, exact transfers in every direction used by the pool and vault, absence of rebasing or autonomous balance changes, and oracle/token unit compatibility. The operational checklist and the evidence required for the future Sepolia demonstration are in [`docs/SAFE_UPGRADE_RUNBOOK.md`](docs/SAFE_UPGRADE_RUNBOOK.md#asset-dependency-preflight).
 
@@ -421,16 +430,18 @@ states. This is the exact tested monotonicity property; it is not a proof over e
 # Test Suite
 
 ```text
-Validation checkpoint: commit 78d6ef6, 2026-09-01
+Historical validation checkpoint for the current code/test state: commit 3643081, 2026-09-01
 
-106  unit
- 11  fuzz
+109  unit
+ 12  fuzz
   9  invariant
   1  integration
  36  script
 ───
-163  total: 163 passed, 0 failed, 0 skipped
+167  total: 167 passed, 0 failed, 0 skipped
 ```
+
+This records one completed validation run for that code/test state; it is not a guarantee about future changes.
 
 ## Coverage Includes
 

@@ -215,18 +215,20 @@ Before and after every implementation change, the compiler storage-layout output
 
 ## 9. Preserved V1 economic behavior
 
-Phase 1 changes dispatch and initialization, not economics. Through the proxy, all existing public/external business functions, getters, custom errors, and business-event signatures must remain ABI-compatible and retain their current behavior.
+Phase 1 changes dispatch and initialization without redesigning protocol economics. It locks the proxy architecture, the exact legacy storage layout, ABI compatibility, and the Phase 1 economic scope. It does not require every edge-case behavior from the original pre-candidate base to remain unchanged: the candidate branch includes reviewed security and correctness hardening that does not redesign the locked Phase 1 economics. This hardening rejects zero-share collateral deposits atomically, strengthens oracle timestamp, decimal, and normalization validation, and makes indebted collateral withdrawals evaluate solvency from the conservatively valued shares remaining after the ceiling-rounded `previewWithdraw` share cost. The remaining-share check prevents an approved withdrawal from leaving debt unsupported when the ERC-4626 exchange rate is non-1:1. Those fixes are part of the current required behavior, while the deliberate V1 limitations in Section 14 remain preserved.
+
+Subject to those reviewed hardening fixes, public/external business functions, getters, custom errors, and business-event signatures must remain ABI-compatible and retain their current behavior through the proxy.
 
 In particular, Phase 1 preserves:
 
 - constructor-equivalent validation and initial configuration;
-- ERC-4626 collateral share accounting and proxy custody of vault shares;
+- ERC-4626 collateral share accounting and proxy custody of vault shares, including atomic rejection when a collateral deposit returns zero shares;
 - lender balances as nominal `liquidityBalanceOf` amounts and `totalLiquidity` accounting;
 - scaled debt, global borrow-index accrual, and the current second-order interest approximation;
 - the current points at which `_updateBorrowIndex()` is called;
-- current borrow, repay, withdrawal, and liquidation checks;
-- every current integer-division direction and rounding result;
-- current oracle normalization and freshness checks;
+- current borrow, repay, and liquidation checks, together with the current hardened withdrawal checks;
+- documented scaled-debt rounding, liquidation ceiling-rounding behavior, and deliberate scaled-debt dust limitations, together with the reviewed remaining-share withdrawal-solvency fix;
+- current hardened oracle answer, round, timestamp, staleness, decimal-bound, and WAD-normalization checks;
 - collateral-capped liquidation and visible residual debt; and
 - current token transfer, approval, and vault interaction behavior, with `address(this)` resolving to the proxy.
 
@@ -390,7 +392,7 @@ Phase 1 implementation work is complete only when all of the following are true:
 - the authority API, events, errors, two-step transfer, no-renounce rule, and ERC-7201 location match this document;
 - `_authorizeUpgrade` accepts only the active authority;
 - the exact legacy storage prefix in Section 7 remains unchanged;
-- existing ABI, errors, business events, economics, rounding, and checkpoint behavior remain compatible except for the specified additions;
+- existing ABI, business events, economics, documented rounding, and checkpoint behavior remain compatible, with current errors and the reviewed oracle hardening, zero-share collateral deposit rejection, and remaining-share withdrawal-solvency hardening retained alongside the specified upgradeability additions;
 - baseline unit, fuzz, and invariant tests pass through the intended deployment model;
 - the complete V1-to-V1.1 matrix and all negative upgrade tests in Section 12 pass;
 - storage-layout output is captured before and after the implementation change and reviewed, with representative mapping values tested through the upgrade;
