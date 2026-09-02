@@ -55,7 +55,7 @@ Deployer/Foundry        V1.1 impl.          LendingPool proxy      Safe 2-of-2  
 
 ## 4. Environment variables
 
-These are the exact Solidity environment variables read by the four scripts. Addresses and configuration values are public inputs; none is a private key, mnemonic, password, or Safe-owner credential. RPC and external account selection are command-line concerns, not Solidity environment variables.
+These are the exact Solidity environment variables read by the scripts. Addresses and configuration values are public inputs; none is a private key, mnemonic, password, or Safe-owner credential. RPC and external account selection are command-line concerns, not Solidity environment variables.
 
 ### V1 deployment: `DeployLendingPoolV1.s.sol`
 
@@ -107,6 +107,27 @@ These are the exact Solidity environment variables read by the four scripts. Add
 | `DEBT_INITIAL_SUPPLY` | Nonzero initial raw supply for 18-decimal `sdUSD`. |
 | `PRICE_FEED` | Explicit external Chainlink ETH/USD proxy address; verify immediately before broadcast. |
 | `MAX_PRICE_STALENESS` | Nonzero maximum accepted feed age in seconds. |
+
+### Educational representative flow: `RunSepoliaDemoFlow.s.sol`
+
+Run this only after the dependency and V1 deployment verification records have been reviewed. It uses one configured external demo actor for operational simplicity; that actor must be distinct from the official Safe and has no upgrade authority. This is an educational single-actor smoke flow, not evidence of multi-party economic independence, production readiness, or formal verification.
+
+| Variable | Meaning |
+|---|---|
+| `EXPECTED_CHAIN_ID` | Must be Sepolia chain ID, `11155111`. |
+| `LENDING_POOL_PROXY` | Canonical deployed LendingPool proxy. |
+| `COLLATERAL_VAULT` | Deployed non-upgradeable CollateralVault. |
+| `COLLATERAL_TOKEN` | Deployed 18-decimal `Sepolia Demo Ether` (`sdETH`). |
+| `DEBT_TOKEN` | Deployed 18-decimal `Sepolia Demo USD` (`sdUSD`). |
+| `PRICE_FEED` | Explicit external official Chainlink Sepolia ETH/USD proxy, 8 decimals. |
+| `EXPECTED_SAFE_AUTHORITY` | Official 2-of-2 Safe expected to be the sole active upgrade authority. |
+| `DEMO_ACTOR` | External Foundry-account address that performs every user operation; never the Safe. |
+| `LIQUIDITY_DEPOSIT_AMOUNT` | Exact `sdUSD` amount deposited as pool liquidity. |
+| `COLLATERAL_DEPOSIT_AMOUNT` | Exact `sdETH` amount deposited as collateral. |
+| `BORROW_AMOUNT` | Exact `sdUSD` amount borrowed. |
+| `PARTIAL_REPAY_AMOUNT` | Nonzero `sdUSD` repayment, strictly less than `BORROW_AMOUNT`. |
+
+The script first performs a read-only preflight and dry-run. A later human must make the separate, explicit decision to add `--broadcast`; no command in this runbook authorizes broadcast by default. When later authorized, use the configured actor's external Foundry account and record seven separate Ethereum transaction hashes, in this exact order: debt-token approval; liquidity deposit; collateral-token approval; collateral deposit; borrow; fresh debt-token repayment approval; and nonzero partial repayment. Record the script output, all seven transaction hashes, configured amounts, actor/pool/vault/token/feed/Safe addresses, before/after token balances, liquidity position, collateral shares, scaled debt, and confirmation that the authority and pending-authority sentinel remained unchanged. The flow never deploys, transfers demo tokens directly, withdraws, liquidates, or invokes an authority/upgrade operation.
 
 ### Asset dependency preflight
 
