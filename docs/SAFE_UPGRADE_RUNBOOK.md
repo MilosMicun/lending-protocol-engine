@@ -55,7 +55,7 @@ Deployer/Foundry        V1.1 impl.          LendingPool proxy      Safe 2-of-2  
 
 ## 4. Environment variables
 
-These are the exact Solidity environment variables read by the three existing scripts. Addresses and configuration values are public inputs; none is a private key, mnemonic, password, or Safe-owner credential. RPC and external account selection are command-line concerns, not Solidity environment variables.
+These are the exact Solidity environment variables read by the four scripts. Addresses and configuration values are public inputs; none is a private key, mnemonic, password, or Safe-owner credential. RPC and external account selection are command-line concerns, not Solidity environment variables.
 
 ### V1 deployment: `DeployLendingPoolV1.s.sol`
 
@@ -97,7 +97,26 @@ These are the exact Solidity environment variables read by the three existing sc
 | `EXPECTED_PENDING_UPGRADE_AUTHORITY` | Expected pending authority, normally the zero-address sentinel. |
 | `EXPECTED_PRE_UPGRADE_STATE_HASH` | State hash emitted by the matching preparation run. |
 
+### Educational dependency deployment: `DeploySepoliaDemoDependencies.s.sol`
+
+| Variable | Meaning |
+|---|---|
+| `EXPECTED_CHAIN_ID` | Must be Sepolia chain ID, `11155111`. |
+| `DEMO_TOKEN_HOLDER` | Nonzero holder receiving each token's complete fixed initial supply. |
+| `COLLATERAL_INITIAL_SUPPLY` | Nonzero initial raw supply for 18-decimal `sdETH`. |
+| `DEBT_INITIAL_SUPPLY` | Nonzero initial raw supply for 18-decimal `sdUSD`. |
+| `PRICE_FEED` | Explicit external Chainlink ETH/USD proxy address; verify immediately before broadcast. |
+| `MAX_PRICE_STALENESS` | Nonzero maximum accepted feed age in seconds. |
+
 ### Asset dependency preflight
+
+#### Educational Sepolia demo dependencies
+
+`SepoliaDemoERC20` is the repository-controlled educational dependency used only when preparing the later Sepolia demonstration. It is instantiated as `Sepolia Demo Ether` (`sdETH`) for ETH-like collateral and `Sepolia Demo USD` (`sdUSD`) for USD-like debt. Both tokens have 18 decimals, a fixed supply minted once at construction, standard exact-transfer OpenZeppelin ERC-20 behavior, and no rebasing or privileged token mechanism. Neither token represents production token infrastructure.
+
+The debt/collateral price dependency remains an external official Chainlink Sepolia ETH/USD AggregatorV3 proxy. It supplies USD per one ETH and is not deployed or controlled by this repository. Immediately before any dependency broadcast, independently verify the exact feed address against the official Chainlink directory and its Sepolia on-chain runtime state; do not replace the explicit `PRICE_FEED` deployment input with a repository constant. With 18-decimal `sdETH`, an ETH/USD price normalized to WAD, and 18-decimal `sdUSD`, `collateralRaw * priceWad / 1e18` produces `sdUSD` raw units.
+
+For the later V1 deployment, pass the official Safe directly as `INITIAL_UPGRADE_AUTHORITY` during atomic proxy initialization. The active authority must then be the Safe and the pending authority must be zero; the deployer is never temporarily granted protocol upgrade authority or transferred out of that role afterward.
 
 The canonical Phase 1 supported-asset boundary is defined in [Supported ERC-20 Asset Boundary (Phase 1)](../README.md#supported-erc-20-asset-boundary-phase-1). The deployment operator and dependency reviewers must complete this checklist before setting `COLLATERAL_ASSET` or `DEBT_ASSET` and before approving the V1 deployment:
 
