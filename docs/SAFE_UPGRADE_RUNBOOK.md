@@ -21,7 +21,7 @@ The implementation deployer and Safe must be distinct. Deployment does not confe
 
 ## 3. Architecture and sequence
 
-Execute the demonstration in this order:
+The recorded public V1 deployment and representative flow completed steps 1-4, with canonical evidence maintained in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). The future public V1-to-V1.1 upgrade begins at step 5. For a separately reviewed independent V1 redeployment, repeat the complete sequence rather than reusing the recorded evidence:
 
 1. Create an official Safe on Sepolia, configure Safe owner A and Safe owner B, and confirm the threshold is 2-of-2.
 2. Deploy the V1 vault and implementation, then deploy the proxy with atomic initialization, passing the Safe address as `INITIAL_UPGRADE_AUTHORITY`.
@@ -127,17 +127,17 @@ Run this only after the dependency and V1 deployment verification records have b
 | `BORROW_AMOUNT` | Exact `sdUSD` amount borrowed. |
 | `PARTIAL_REPAY_AMOUNT` | Nonzero `sdUSD` repayment, strictly less than `BORROW_AMOUNT`. |
 
-The script first performs a read-only preflight and dry-run. A later human must make the separate, explicit decision to add `--broadcast`; no command in this runbook authorizes broadcast by default. When later authorized, use the configured actor's external Foundry account and record seven separate Ethereum transaction hashes, in this exact order: debt-token approval; liquidity deposit; collateral-token approval; collateral deposit; borrow; fresh debt-token repayment approval; and nonzero partial repayment. Record the script output, all seven transaction hashes, configured amounts, actor/pool/vault/token/feed/Safe addresses, before/after token balances, liquidity position, collateral shares, scaled debt, and confirmation that the authority and pending-authority sentinel remained unchanged. The flow never deploys, transfers demo tokens directly, withdraws, liquidates, or invokes an authority/upgrade operation.
+For any future independently reviewed run, the script first performs a read-only preflight and dry-run. A human must make the separate, explicit decision to add `--broadcast`; no command in this runbook authorizes broadcast by default. When authorized, use the configured actor's external Foundry account and record seven separate Ethereum transaction hashes, in this exact order: debt-token approval; liquidity deposit; collateral-token approval; collateral deposit; borrow; fresh debt-token repayment approval; and nonzero partial repayment. Record the script output, all seven transaction hashes, configured amounts, actor/pool/vault/token/feed/Safe addresses, before/after token balances, liquidity position, collateral shares, scaled debt, and confirmation that the authority and pending-authority sentinel remained unchanged. The flow never deploys, transfers demo tokens directly, withdraws, liquidates, or invokes an authority/upgrade operation.
 
 ### Asset dependency preflight
 
 #### Educational Sepolia demo dependencies
 
-`SepoliaDemoERC20` is the repository-controlled educational dependency used only when preparing the later Sepolia demonstration. It is instantiated as `Sepolia Demo Ether` (`sdETH`) for ETH-like collateral and `Sepolia Demo USD` (`sdUSD`) for USD-like debt. Both tokens have 18 decimals, a fixed supply minted once at construction, standard exact-transfer OpenZeppelin ERC-20 behavior, and no rebasing or privileged token mechanism. Neither token represents production token infrastructure.
+`SepoliaDemoERC20` is the repository-controlled educational dependency used for the recorded public Sepolia V1 demonstration and may be used only for a separately reviewed educational redeployment. It is instantiated as `Sepolia Demo Ether` (`sdETH`) for ETH-like collateral and `Sepolia Demo USD` (`sdUSD`) for USD-like debt. Both tokens have 18 decimals, a fixed supply minted once at construction, standard exact-transfer OpenZeppelin ERC-20 behavior, and no rebasing or privileged token mechanism. Neither token represents production token infrastructure.
 
 The debt/collateral price dependency remains an external official Chainlink Sepolia ETH/USD AggregatorV3 proxy. It supplies USD per one ETH and is not deployed or controlled by this repository. Immediately before any dependency broadcast, independently verify the exact feed address against the official Chainlink directory and its Sepolia on-chain runtime state; do not replace the explicit `PRICE_FEED` deployment input with a repository constant. With 18-decimal `sdETH`, an ETH/USD price normalized to WAD, and 18-decimal `sdUSD`, `collateralRaw * priceWad / 1e18` produces `sdUSD` raw units.
 
-For the later V1 deployment, pass the official Safe directly as `INITIAL_UPGRADE_AUTHORITY` during atomic proxy initialization. The active authority must then be the Safe and the pending authority must be zero; the deployer is never temporarily granted protocol upgrade authority or transferred out of that role afterward.
+The recorded V1 deployment passed the official Safe directly as `INITIAL_UPGRADE_AUTHORITY` during atomic proxy initialization. The active authority was therefore the Safe, the pending authority was zero, and the deployer was never temporarily granted protocol upgrade authority or transferred out of that role afterward. Any later independent deployment must preserve and independently verify this property.
 
 The canonical Phase 1 asset and callback boundary is defined in [Asset and callback boundary](../README.md#asset-and-callback-boundary). The deployment operator and dependency reviewers must complete this checklist before setting `COLLATERAL_ASSET` or `DEBT_ASSET` and before approving the V1 deployment:
 
@@ -259,7 +259,7 @@ Any mismatch invalidates the review. Do not edit decoded arguments, operation, o
 
 ### Final execution-approval checkpoint
 
-Immediately before approving execution, both owners must complete this checkpoint against the exact Safe proposal. No pre-execution item below may remain `PENDING`; the `PENDING` values in Section 9 are only an uncompleted public-demonstration template.
+Immediately before approving execution, both owners must complete this checkpoint against the exact Safe proposal. No pre-execution item below may remain `PENDING`; Section 9's upgrade-specific `PENDING` values describe the future public V1-to-V1.1 upgrade only.
 
 - [ ] `to`, `value`, and `data` match the reviewed preparation output exactly;
 - [ ] operation name `CALL` and numeric operation value `0` are recorded and unchanged;
@@ -311,9 +311,15 @@ If verification fails after Safe execution:
 
 ## 9. Public evidence checklist
 
-All fields below are **PENDING until the public Sepolia run occurs**. A placeholder is not evidence and must not be replaced with an invented address, hash, result, link, or report.
+### Recorded public V1 deployment
 
-| Evidence | Pending value |
+The public Sepolia V1 deployment and representative on-chain flow are complete. Canonical addresses, transaction hashes, authority state, source-verification status, and flow evidence are maintained in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). Do not duplicate or fork that canonical record in this runbook.
+
+### Future V1 redeployment template
+
+This is a blank template for a new, independently reviewed V1 deployment. Every field starts `PENDING` for that new run. These placeholders do not describe the completed recorded deployment, must not be filled by copying its evidence, and are not evidence. Do not invent a missing address, hash, result, link, or report.
+
+| New V1 deployment evidence | New-run value |
 |---|---|
 | Commit SHA | `PENDING` |
 | Sepolia chain ID | `PENDING` |
@@ -335,6 +341,13 @@ All fields below are **PENDING until the public Sepolia run occurs**. A placehol
 | LendingPool proxy address | `PENDING` |
 | V1 deployment transaction | `PENDING` |
 | Representative V1 flow transaction hash or hashes | `PENDING` |
+
+### Future public V1-to-V1.1 upgrade evidence
+
+No public V1-to-V1.1 upgrade has occurred. Every upgrade-specific field below remains `PENDING` until the separate Safe preparation, two-owner review, execution, verification, and evidence process is completed. Placeholders are not evidence and must not be replaced with invented values.
+
+| Future V1-to-V1.1 upgrade evidence | Pending value |
+|---|---|
 | V1.1 implementation address | `PENDING` |
 | V1.1 implementation-deployment transaction | `PENDING` |
 | Prepared target, value, and calldata | `PENDING` |

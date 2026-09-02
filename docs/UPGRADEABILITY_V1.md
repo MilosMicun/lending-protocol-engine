@@ -9,7 +9,7 @@ Phase 1 began without deployed state requiring migration. The locked legacy stor
 This specification separates four categories:
 
 - **Current behavior** is behavior proven by the current Solidity sources, compiler storage-layout report, and baseline tests.
-- **Locked Phase 1 behavior** records requirements implemented locally and requirements that still govern the future public Sepolia demonstration.
+- **Locked Phase 1 behavior** records requirements implemented locally, requirements satisfied by the recorded public V1 deployment where applicable, and constraints that continue to govern later deployments and upgrades.
 - **Known pre-existing limitations** are current economic or accounting characteristics that Phase 1 must preserve rather than repair.
 - **Future work** is governed by the compatibility rules in this document but is not part of Phase 1.
 
@@ -43,9 +43,9 @@ OpenZeppelin 5.6.1 provides the required mechanics:
 
 Only `LendingPool` is upgradeable. Constructor-based `Ownable`, or any other inheritance that inserts linear state before the legacy prefix, is forbidden.
 
-After local tests and adversarial review pass, this architecture must be demonstrated in a public Sepolia portfolio deployment. Sepolia is the locked Phase 1 demonstration network, but it does not make the system production-ready.
+This architecture has now been demonstrated through the recorded public Sepolia V1 deployment; see [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). Sepolia remains the locked Phase 1 educational testnet environment, and the deployment does not make the system production-ready.
 
-The selected authority for the future Sepolia demonstration is an official Safe configured with two distinct development EOA owners and a 2-of-2 threshold. The Safe is external infrastructure: the repository does not implement Safe, a multisig, governance, or a timelock, and this selection does not expand the core protocol scope.
+The deployed canonical proxy's active authority is the recorded official Safe, configured with two distinct development EOA owners and a 2-of-2 threshold. No public V1-to-V1.1 upgrade has been executed. The Safe is external infrastructure: the repository does not implement Safe, a multisig, governance, or a timelock, and this selection does not expand the core protocol scope.
 
 ## 4. Initialization specification
 
@@ -91,7 +91,7 @@ After validation, the initializer performs every locked assignment and initial v
 
 The initializer atomically stores `initialUpgradeAuthority_` as the active upgrade authority and initializes the pending-authority field to the zero-value no-pending sentinel. It does not derive either authority value from `msg.sender`. The proxy deployer and configured initial authority are independent addresses and may differ; for example, a deployment account or factory may deploy the proxy while a multisig is explicitly configured as the initial authority.
 
-For the public Sepolia demonstration, the deployment account and the Safe must be distinct, and the Safe address must be passed explicitly as `initialUpgradeAuthority_`. The deployer receives no authority from broadcasting the deployment.
+For the recorded public Sepolia V1 deployment, the deployment account and the Safe were distinct, and the Safe address was passed explicitly as `initialUpgradeAuthority_`. The deployer received no authority from broadcasting the deployment. Any future independent deployment must preserve and independently verify these properties.
 
 The initializer is version 1 and succeeds exactly once in proxy storage. A second proxy call to it reverts with OpenZeppelin's `InvalidInitialization()`. The implementation's constructor-time `_disableInitializers()` affects only implementation storage and does not prevent the constructor delegatecall from initializing proxy storage.
 
@@ -131,7 +131,7 @@ The zero value returned by `pendingUpgradeAuthority()` means that no nomination 
 
 `_authorizeUpgrade(address)` authorizes only when `msg.sender == upgradeAuthority()`. No pending authority, proxy deployer, proxy admin, token holder, vault owner, or other address receives implicit permission. In particular, deploying the proxy confers no upgrade permission unless that address was separately supplied as `initialUpgradeAuthority_` or later accepted a valid two-step transfer. Unauthorized calls revert with `UnauthorizedUpgradeAuthority(msg.sender)`.
 
-For the future Sepolia demonstration, the Safe is the only active upgrade authority and both Safe owners must confirm under its 2-of-2 policy. Foundry may deploy implementations and prepare an exact Safe transaction, but it must never receive or impersonate the Safe authority and must not consume an authority private key or mnemonic. Safe execution is external to the repository tooling.
+For the recorded V1 deployment, the Safe was configured directly as the active authority during atomic proxy initialization. Any future upgrade requires both Safe owners to confirm under its 2-of-2 policy. Foundry may deploy a future implementation and prepare exact calldata, but it must never receive, impersonate, or control the Safe authority and must not consume an authority private key or mnemonic. Safe upgrade execution remains external to the repository tooling, and no public V1-to-V1.1 upgrade has occurred.
 
 ## 6. ERC-7201 authority storage specification
 
@@ -275,7 +275,7 @@ The vendored OpenZeppelin 5.6.1 proxy rejects empty constructor `_data` by defau
 
 ### Sepolia portfolio deployment
 
-Only after all local unit, fuzz, invariant, proxy, upgrade, and adversarial tests pass and the implementation receives an adversarial review may Phase 1 proceed to its concluding public Sepolia portfolio deployment. The Sepolia exercise must:
+The recorded public V1 deployment completed the applicable V1 deployment, authority, representative-flow, and verification requirements below; its canonical evidence is in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). The V1.1 preparation, Safe execution, and post-upgrade verification requirements remain future work because no public V1-to-V1.1 upgrade has occurred. Any independent V1 redeployment must repeat all applicable checks rather than reuse the recorded deployment's evidence. The end-to-end Sepolia exercise requires:
 
 1. deploy the non-upgradeable `CollateralVault` and any required testnet-only token, oracle, or other dependency;
 2. clearly label every testnet-only dependency, record its purpose and address, and prevent it from being mistaken for a production dependency;
@@ -293,7 +293,7 @@ Only after all local unit, fuzz, invariant, proxy, upgrade, and adversarial test
 14. perform explorer source verification for the proxy, V1 implementation, V1.1 implementation, vault, and repository-owned testnet dependencies when supported by the available tooling, and record any tooling limitation that prevents verification; and
 15. publish an explicit notice that the Sepolia deployment is educational portfolio infrastructure, uses testnet-only assets or dependencies where identified, and is not production-ready.
 
-The on-chain demonstration must use the proxy as the canonical pool and custody address throughout. Deployment, preparation, and upgrade execution must not transfer protocol assets, approvals, or vault shares to either implementation. Unchanged unsolicited token or vault-share dust may already exist at an implementation address and must be recorded rather than treated as protocol custody. Any implementation custody delta caused during the controlled workflow must fail validation. Sepolia addresses and transaction hashes are deployment artifacts to be recorded during Phase 1 implementation; this specification does not invent them in advance.
+The recorded V1 deployment uses the proxy as the canonical pool and custody address. Any future independent redeployment or V1-to-V1.1 upgrade demonstration must continue to use the proxy in that role. Deployment, preparation, and upgrade execution must not transfer protocol assets, approvals, or vault shares to either implementation. Unchanged unsolicited token or vault-share dust may already exist at an implementation address and must be recorded rather than treated as protocol custody. Any implementation custody delta caused during the controlled workflow must fail validation. Recorded V1 addresses and transaction hashes remain canonical in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md); future redeployment or upgrade artifacts require their own evidence.
 
 Preparation, external Safe execution, and verification must occur in a controlled state-freeze window. The v2 cross-run fingerprint binds the chain, proxy, expected old and new implementations, legacy slots 0–17, active and pending authorities, configuration, aggregate accounting, the direct proxy collateral-asset balance, proxy debt-asset balance, proxy vault-share balance, existing vault custody observations, and old/new implementation custody balances. The ERC-1967 implementation-slot value is intentionally excluded because it must change; the verifier checks that slot independently. Unchanged unsolicited implementation dust and unchanged direct proxy collateral dust are accepted, while changes to fingerprinted protocol state or custody, including any direct proxy collateral delta or legitimate intervening activity, cause a mismatch. Raw mapping seed slots do not enumerate or cryptographically prove every mapping entry, so representative positions remain covered separately by integration tests. This fingerprint is operational evidence, not formal verification.
 
@@ -379,7 +379,7 @@ The current `docs/protocol-spec.md` remains a simplified conceptual document out
 
 ## 15. Acceptance criteria for complete Phase 1
 
-Phase 1 implementation work is complete only when all of the following are true:
+The local implementation and public V1 deployment satisfy the applicable criteria below. Criteria requiring a public V1-to-V1.1 upgrade remain future work because that upgrade has not occurred. Complete end-to-end Phase 1 evidence requires all of the following:
 
 - the canonical pool is a new `LendingPool` implementation behind a real vendored OpenZeppelin 5.6.1 `ERC1967Proxy`;
 - only `LendingPool` is upgradeable and `CollateralVault` remains non-upgradeable;
@@ -411,7 +411,7 @@ Phase 1 implementation work is complete only when all of the following are true:
 
 Every future implementation version must begin from this specification and provide a version-specific design, storage diff, threat review, and upgrade test. It must retain the exact slots 0–17 prefix and every previously committed namespace. A field inside a namespace must not be reordered, deleted, or type-changed; additions require the same append-only discipline within that namespace.
 
-Before authorization, reviewers must verify the new implementation has code, implements UUPS/ERC-1822 with the correct ERC-1967 implementation-slot UUID, preserves the proxy-context protections, and cannot initialize itself. Upgrade transactions must be prepared for the explicitly configured active authority, which need not be the original proxy deployer, and must use `upgradeToAndCall` with explicitly reviewed data. For the Sepolia demonstration, this means deploy-and-prepare by a separate implementation deployer, 2-of-2 execution by the external Safe, and independent read-only verification; it does not make Safe part of the core protocol implementation.
+Before authorization, reviewers must verify the new implementation has code, implements UUPS/ERC-1822 with the correct ERC-1967 implementation-slot UUID, preserves the proxy-context protections, and cannot initialize itself. Upgrade transactions must be prepared for the explicitly configured active authority, which need not be the original proxy deployer, and must use `upgradeToAndCall` with explicitly reviewed data. For the future public Sepolia V1-to-V1.1 upgrade, this means deploy-and-prepare by a separate implementation deployer, 2-of-2 execution by the external Safe, and independent read-only verification; it does not make Safe part of the core protocol implementation.
 
 New reinitializers are allowed only when a future version needs new state initialization. Each must use a unique monotonically increasing version, be callable only through the proxy under explicitly documented authorization, initialize only newly introduced state, and be executed atomically with the upgrade when required. A version must never reuse an initializer or reset initialization state.
 
