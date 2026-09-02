@@ -139,7 +139,7 @@ The debt/collateral price dependency remains an external official Chainlink Sepo
 
 For the later V1 deployment, pass the official Safe directly as `INITIAL_UPGRADE_AUTHORITY` during atomic proxy initialization. The active authority must then be the Safe and the pending authority must be zero; the deployer is never temporarily granted protocol upgrade authority or transferred out of that role afterward.
 
-The canonical Phase 1 supported-asset boundary is defined in [Supported ERC-20 Asset Boundary (Phase 1)](../README.md#supported-erc-20-asset-boundary-phase-1). The deployment operator and dependency reviewers must complete this checklist before setting `COLLATERAL_ASSET` or `DEBT_ASSET` and before approving the V1 deployment:
+The canonical Phase 1 asset and callback boundary is defined in [Asset and callback boundary](../README.md#asset-and-callback-boundary). The deployment operator and dependency reviewers must complete this checklist before setting `COLLATERAL_ASSET` or `DEBT_ASSET` and before approving the V1 deployment:
 
 - [ ] confirm the network is Sepolia (`11155111`) and independently resolve each exact token address from the reviewed deployment record;
 - [ ] record whether each token is a repository-controlled testnet mock or an external dependency, and verify its name and symbol when those metadata functions are available;
@@ -154,7 +154,7 @@ The canonical Phase 1 supported-asset boundary is defined in [Supported ERC-20 A
 
 The deployment script's code-length and `balanceOf` probes do not prove these properties. Successful ERC-20 calls and matching decimals are also insufficient on their own. If any identity, bytecode, behavior, decimals, or unit evidence is missing or inconsistent, do not deploy with that dependency.
 
-This repository currently contains no verified public Sepolia collateral-asset or debt-asset address, metadata, decimals, or behavioral evidence. Those dependencies must remain pending until the later public deployment records the evidence below; placeholders and unverified external claims are not acceptable substitutes.
+Verified public Sepolia dependency and deployment evidence now exists in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). It records the repository-controlled fixed-supply demo assets sdETH and sdUSD, including their public addresses, metadata roles, verified-source links, deployment transactions, and representative flow. This evidence applies only to the recorded deployment; any later redeployment must independently repeat dependency, bytecode, decimal, unit, oracle, and behavioral checks rather than blindly reusing the recorded evidence.
 
 ## 5. Commands
 
