@@ -16,6 +16,29 @@ import {OracleLib} from "../../src/lib/OracleLib.sol";
 
 contract IncompatibleDependency {}
 
+contract ProbeAccountOnlyErc20 {
+    address internal constant ERC20_PROBE_ACCOUNT = 0x000000000000000000000000000000000000dEaD;
+
+    function balanceOf(address account) external pure returns (uint256) {
+        require(account == ERC20_PROBE_ACCOUNT, "unexpected probe account");
+        return 0;
+    }
+}
+
+contract RevertingBalanceOfErc20 {
+    function balanceOf(address) external pure returns (uint256) {
+        revert("balanceOf failed");
+    }
+}
+
+contract MalformedBalanceOfErc20 {
+    function balanceOf(address) external pure {
+        assembly ("memory-safe") {
+            return(0, 31)
+        }
+    }
+}
+
 contract DeployLendingPoolV1Test is Test {
     bytes32 internal constant ERC1967_IMPLEMENTATION_SLOT =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
@@ -278,6 +301,45 @@ contract DeployLendingPoolV1Test is Test {
                 DeployLendingPoolV1.DependencyInterfaceProbeFailed.selector,
                 address(incompatible),
                 bytes4(keccak256("decimals()"))
+            )
+        );
+    }
+
+    function test_Erc20ProbeUsesStableNonScriptAccount() public {
+        ProbeAccountOnlyErc20 probeAccountOnlyToken = new ProbeAccountOnlyErc20();
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.collateralAsset = address(probeAccountOnlyToken);
+        config.debtAsset = address(probeAccountOnlyToken);
+
+        deployer.validateConfig(config);
+    }
+
+    function test_Erc20ProbeRejectsFailedBalanceOf() public {
+        RevertingBalanceOfErc20 revertingToken = new RevertingBalanceOfErc20();
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.collateralAsset = address(revertingToken);
+
+        _expectInvalidConfig(
+            config,
+            abi.encodeWithSelector(
+                DeployLendingPoolV1.DependencyInterfaceProbeFailed.selector,
+                address(revertingToken),
+                bytes4(keccak256("balanceOf(address)"))
+            )
+        );
+    }
+
+    function test_Erc20ProbeRejectsMalformedBalanceOfReturnData() public {
+        MalformedBalanceOfErc20 malformedToken = new MalformedBalanceOfErc20();
+        DeployLendingPoolV1.DeploymentConfig memory config = _validConfig();
+        config.collateralAsset = address(malformedToken);
+
+        _expectInvalidConfig(
+            config,
+            abi.encodeWithSelector(
+                DeployLendingPoolV1.DependencyInterfaceProbeFailed.selector,
+                address(malformedToken),
+                bytes4(keccak256("balanceOf(address)"))
             )
         );
     }

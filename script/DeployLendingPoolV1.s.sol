@@ -76,6 +76,8 @@ contract DeployLendingPoolV1 is Script {
 
     uint256 internal constant BPS = 10_000;
     uint256 internal constant WAD = 1e18;
+    // Used only to verify balanceOf ABI success and correctly sized return data.
+    address internal constant ERC20_PROBE_ACCOUNT = 0x000000000000000000000000000000000000dEaD;
     bytes32 public constant ERC1967_IMPLEMENTATION_SLOT =
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
@@ -302,7 +304,8 @@ contract DeployLendingPoolV1 is Script {
 
     function _probeErc20(address asset) internal view {
         bytes4 selector = IERC20.balanceOf.selector;
-        (bool success, bytes memory returnData) = asset.staticcall(abi.encodeCall(IERC20.balanceOf, (address(this))));
+        (bool success, bytes memory returnData) =
+            asset.staticcall(abi.encodeCall(IERC20.balanceOf, (ERC20_PROBE_ACCOUNT)));
         if (!success || returnData.length != 32) {
             revert DependencyInterfaceProbeFailed(asset, selector);
         }
