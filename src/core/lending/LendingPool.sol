@@ -2,13 +2,24 @@
 pragma solidity ^0.8.24;
 
 import {CollateralVault} from "../vault/CollateralVault.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IPriceFeed} from "../../interfaces/IPriceFeed.sol";
 import {OracleLib} from "../../lib/OracleLib.sol";
 
-contract LendingPool {
+contract LendingPool is Initializable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
+
+    /// @custom:storage-location erc7201:lending.protocol.storage.LendingPoolUpgradeAuthority
+    struct UpgradeAuthorityStorage {
+        address activeAuthority;
+        address pendingAuthority;
+    }
+
+    bytes32 private constant UPGRADE_AUTHORITY_STORAGE =
+        0x8000ce11f38414f298b74975bfaea500fcdbebb431834e96f66ac2883c9bb800;
 
     uint256 public ltvBps;
     uint256 public liquidationThresholdBps;
@@ -43,6 +54,7 @@ contract LendingPool {
     error InvalidInterestRateModel();
     error InvalidStalenessWindow();
     error ZeroAmount();
+    error ZeroCollateralShares();
     error InsufficientCollateral();
     error InsufficientLiquidity();
     error BorrowExceedsLimit();
@@ -51,6 +63,9 @@ contract LendingPool {
     error SelfLiquidation();
     error BadDebt();
     error HealthFactorTooLow();
+    error UnauthorizedUpgradeAuthority(address caller);
+    error InvalidUpgradeAuthority(address authority);
+    error NotPendingUpgradeAuthority(address caller);
 
     event Deposited(address indexed user, uint256 amount, uint256 shares);
     event Withdrawn(address indexed user, uint256 amount, uint256 shares);
@@ -60,6 +75,9 @@ contract LendingPool {
     event Repaid(address indexed user, uint256 amount, uint256 newDebt);
     event BorrowIndexUpdated(uint256 newBorrowIndex);
 
+    event UpgradeAuthorityTransferStarted(address indexed currentAuthority, address indexed pendingAuthority);
+    event UpgradeAuthorityTransferred(address indexed previousAuthority, address indexed newAuthority);
+
     event Liquidated(
         address indexed liquidator,
         address indexed borrower,
@@ -68,7 +86,11 @@ contract LendingPool {
         uint256 seizedAssets
     );
 
-    constructor(
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
         address priceFeed_,
         address vault_,
         address debtAsset_,
@@ -77,8 +99,9 @@ contract LendingPool {
         uint256 liquidationThresholdBps_,
         uint256 liquidationBonusBps_,
         uint256 baseBorrowRate_,
-        uint256 borrowRateSlope_
-    ) {
+        uint256 borrowRateSlope_,
+        address initialUpgradeAuthority_
+    ) external initializer {
         if (priceFeed_ == address(0) || vault_ == address(0) || debtAsset_ == address(0)) {
             revert ZeroAddress();
         }
@@ -98,6 +121,10 @@ contract LendingPool {
             revert InvalidInterestRateModel();
         }
 
+        if (initialUpgradeAuthority_ == address(0)) {
+            revert InvalidUpgradeAuthority(initialUpgradeAuthority_);
+        }
+
         priceFeed = IPriceFeed(priceFeed_);
         vault = CollateralVault(vault_);
         collateralAsset = IERC20(vault.asset());
@@ -111,6 +138,48 @@ contract LendingPool {
         lastBorrowIndexUpdate = block.timestamp;
         baseBorrowRate = baseBorrowRate_;
         borrowRateSlope = borrowRateSlope_;
+
+        UpgradeAuthorityStorage storage authorityStorage = _getUpgradeAuthorityStorage();
+        authorityStorage.activeAuthority = initialUpgradeAuthority_;
+        authorityStorage.pendingAuthority = address(0);
+    }
+
+    function upgradeAuthority() public view returns (address) {
+        return _getUpgradeAuthorityStorage().activeAuthority;
+    }
+
+    function pendingUpgradeAuthority() public view returns (address) {
+        return _getUpgradeAuthorityStorage().pendingAuthority;
+    }
+
+    function proposeUpgradeAuthority(address newAuthority) external {
+        UpgradeAuthorityStorage storage authorityStorage = _getUpgradeAuthorityStorage();
+
+        if (msg.sender != authorityStorage.activeAuthority) {
+            revert UnauthorizedUpgradeAuthority(msg.sender);
+        }
+
+        if (newAuthority == address(0)) {
+            revert InvalidUpgradeAuthority(newAuthority);
+        }
+
+        authorityStorage.pendingAuthority = newAuthority;
+
+        emit UpgradeAuthorityTransferStarted(authorityStorage.activeAuthority, newAuthority);
+    }
+
+    function acceptUpgradeAuthority() external {
+        UpgradeAuthorityStorage storage authorityStorage = _getUpgradeAuthorityStorage();
+
+        if (msg.sender != authorityStorage.pendingAuthority) {
+            revert NotPendingUpgradeAuthority(msg.sender);
+        }
+
+        address previousAuthority = authorityStorage.activeAuthority;
+        authorityStorage.activeAuthority = msg.sender;
+        authorityStorage.pendingAuthority = address(0);
+
+        emit UpgradeAuthorityTransferred(previousAuthority, msg.sender);
     }
 
     function debtBalanceOf(address user) public view returns (uint256) {
@@ -164,6 +233,7 @@ contract LendingPool {
         collateralAsset.forceApprove(address(vault), amount);
 
         uint256 shares = vault.deposit(amount, address(this));
+        if (shares == 0) revert ZeroCollateralShares();
 
         collateralSharesOf[msg.sender] += shares;
         totalCollateralShares += shares;
@@ -179,10 +249,11 @@ contract LendingPool {
         uint256 collateral = collateralSharesOf[msg.sender];
         if (collateral < sharesNeeded) revert InsufficientCollateral();
 
-        uint256 remainingCollateralAssets = getCollateralAssets(msg.sender) - amount;
         uint256 debt = debtBalanceOf(msg.sender);
 
         if (debt != 0) {
+            uint256 remainingShares = collateral - sharesNeeded;
+            uint256 remainingCollateralAssets = vault.convertToAssets(remainingShares);
             uint256 priceWad = OracleLib.getFreshPriceWad(priceFeed, maxPriceStaleness);
             uint256 remainingCollateralValue = remainingCollateralAssets * priceWad / WAD;
 
@@ -203,10 +274,10 @@ contract LendingPool {
 
     function depositLiquidity(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
-        // NOTE: The borrow index is not updated here intentionally.
-        // Interest accrues on the next debt-mutating action: borrow, repay, or liquidate.
-        // A large liquidity deposit between accruals may slightly undercharge borrowers
-        // for the previous period because utilization is recalculated with the new liquidity.
+        // NOTE: depositLiquidity does not checkpoint the stored borrowIndex.
+        // currentBorrowIndex() computes elapsed growth from lastBorrowIndexUpdate using utilization
+        // derived from the current totalLiquidity, so this deposit can lower the rate applied to
+        // the entire uncheckpointed interval. borrow, repay, and liquidate checkpoint the result.
         debtAsset.safeTransferFrom(msg.sender, address(this), amount);
 
         liquidityBalanceOf[msg.sender] += amount;
@@ -410,5 +481,19 @@ contract LendingPool {
 
     function _storedTotalDebt() internal view returns (uint256) {
         return totalScaledDebt * borrowIndex / WAD;
+    }
+
+    function _authorizeUpgrade(address) internal view override {
+        if (msg.sender != upgradeAuthority()) {
+            revert UnauthorizedUpgradeAuthority(msg.sender);
+        }
+    }
+
+    function _getUpgradeAuthorityStorage() private pure returns (UpgradeAuthorityStorage storage authorityStorage) {
+        bytes32 slot = UPGRADE_AUTHORITY_STORAGE;
+
+        assembly ("memory-safe") {
+            authorityStorage.slot := slot
+        }
     }
 }

@@ -5,6 +5,7 @@ libs = ["lib"]
 test = "test"
 script = "script"
 solc = "0.8.24"
+extra_output = ["storageLayout"]
 ignored_warnings_from = ["lib/"]
 
 [profile.default.fmt]

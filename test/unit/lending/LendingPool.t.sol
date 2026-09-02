@@ -6,12 +6,13 @@ import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockV3Aggregator} from "../../mocks/MockV3Aggregator.sol";
+import {LendingPoolProxyFixture} from "../../helpers/LendingPoolProxyFixture.sol";
 
 import {CollateralVault} from "../../../src/core/vault/CollateralVault.sol";
 import {LendingPool} from "../../../src/core/lending/LendingPool.sol";
 import {OracleLib} from "../../../src/lib/OracleLib.sol";
 
-contract LendingPoolTest is Test {
+contract LendingPoolTest is Test, LendingPoolProxyFixture {
     using stdStorage for StdStorage;
 
     event Repaid(address indexed user, uint256 amount, uint256 newDebt);
@@ -20,6 +21,7 @@ contract LendingPoolTest is Test {
     MockERC20 internal asset;
     CollateralVault internal vault;
     LendingPool internal pool;
+    LendingPool internal poolImplementation;
     MockV3Aggregator internal priceFeed;
 
     address internal user;
@@ -49,17 +51,20 @@ contract LendingPoolTest is Test {
         vault = new CollateralVault("Vault Share", "VSS", asset);
         priceFeed = new MockV3Aggregator(PRICE_DECIMALS, INITIAL_PRICE, block.timestamp);
 
-        pool = new LendingPool(
-            address(priceFeed),
-            address(vault),
-            address(asset),
-            MAX_PRICE_STALENESS,
-            LTV_BPS,
-            LIQUIDATION_THRESHOLD_BPS,
-            LIQUIDATION_BONUS_BPS,
-            BASE_BORROW_RATE,
-            BORROW_RATE_SLOPE
-        );
+        LendingPoolProxyConfig memory config = LendingPoolProxyConfig({
+            priceFeed: address(priceFeed),
+            vault: address(vault),
+            debtAsset: address(asset),
+            maxPriceStaleness: MAX_PRICE_STALENESS,
+            ltvBps: LTV_BPS,
+            liquidationThresholdBps: LIQUIDATION_THRESHOLD_BPS,
+            liquidationBonusBps: LIQUIDATION_BONUS_BPS,
+            baseBorrowRate: BASE_BORROW_RATE,
+            borrowRateSlope: BORROW_RATE_SLOPE,
+            initialUpgradeAuthority: address(this)
+        });
+
+        (pool, poolImplementation) = _deployLendingPoolProxy(config);
 
         asset.mint(user, 1_000 ether);
         asset.mint(lp, 1_000 ether);
@@ -101,26 +106,28 @@ contract LendingPoolTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                            CONSTRUCTOR TESTS
+                           INITIALIZATION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_Constructor_RevertsIfInterestRateModelInvalid() public {
+    function test_Initialization_RevertsIfInterestRateModelInvalid() public {
         uint256 invalidBaseRate = 0.8e18;
         uint256 invalidSlope = 0.3e18;
+        LendingPool invalidImplementation = new LendingPool();
+        LendingPoolProxyConfig memory invalidConfig = LendingPoolProxyConfig({
+            priceFeed: address(priceFeed),
+            vault: address(vault),
+            debtAsset: address(asset),
+            maxPriceStaleness: MAX_PRICE_STALENESS,
+            ltvBps: LTV_BPS,
+            liquidationThresholdBps: LIQUIDATION_THRESHOLD_BPS,
+            liquidationBonusBps: LIQUIDATION_BONUS_BPS,
+            baseBorrowRate: invalidBaseRate,
+            borrowRateSlope: invalidSlope,
+            initialUpgradeAuthority: address(this)
+        });
 
         vm.expectRevert(LendingPool.InvalidInterestRateModel.selector);
-
-        new LendingPool(
-            address(priceFeed),
-            address(vault),
-            address(asset),
-            MAX_PRICE_STALENESS,
-            LTV_BPS,
-            LIQUIDATION_THRESHOLD_BPS,
-            LIQUIDATION_BONUS_BPS,
-            invalidBaseRate,
-            invalidSlope
-        );
+        _deployLendingPoolProxy(invalidImplementation, invalidConfig);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -142,6 +149,33 @@ contract LendingPoolTest is Test {
         assertEq(pool.collateralSharesOf(user), expectedShares);
         assertEq(pool.totalCollateralShares(), expectedShares);
         assertEq(vault.balanceOf(address(pool)), expectedShares);
+    }
+
+    function test_DepositCollateralRevertsWhenVaultWouldMintZeroShares() public {
+        uint256 donationAmount = 1 ether;
+        uint256 depositAmount = 1;
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        assertGt(depositAmount, 0);
+        assertEq(vault.previewDeposit(depositAmount), 0);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+        uint256 vaultAssetsBefore = vault.totalAssets();
+        uint256 vaultSupplyBefore = vault.totalSupply();
+        uint256 userSharesBefore = pool.collateralSharesOf(user);
+        uint256 totalSharesBefore = pool.totalCollateralShares();
+
+        vm.prank(user);
+        vm.expectRevert(LendingPool.ZeroCollateralShares.selector);
+        pool.depositCollateral(depositAmount);
+
+        assertEq(asset.balanceOf(user), userBalanceBefore);
+        assertEq(vault.totalAssets(), vaultAssetsBefore);
+        assertEq(vault.totalSupply(), vaultSupplyBefore);
+        assertEq(pool.collateralSharesOf(user), userSharesBefore);
+        assertEq(pool.totalCollateralShares(), totalSharesBefore);
     }
 
     function test_WithdrawCollateral_TransfersAssetsBackAndUpdatesAccounting() public {
@@ -195,6 +229,139 @@ contract LendingPoolTest is Test {
         vm.prank(user);
         vm.expectRevert(LendingPool.HealthFactorTooLow.selector);
         pool.withdrawCollateral(withdrawAmount);
+    }
+
+    function test_WithdrawCollateral_RevertsWhenShareRoundingWouldLeaveDebtWithoutCollateral() public {
+        uint256 depositAmount = 1;
+        uint256 donationAmount = 6;
+        uint256 borrowAmount = 2;
+        uint256 withdrawAmount = 1;
+
+        vm.prank(lp);
+        pool.depositLiquidity(10);
+
+        vm.prank(user);
+        pool.depositCollateral(depositAmount);
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        uint256 userShares = pool.collateralSharesOf(user);
+        uint256 sharesNeeded = vault.previewWithdraw(withdrawAmount);
+        uint256 preWithdrawAssets = vault.convertToAssets(userShares);
+        uint256 estimatedRemainingAssets = preWithdrawAssets - withdrawAmount;
+        uint256 actualRemainingAssets = vault.convertToAssets(userShares - sharesNeeded);
+
+        assertEq(userShares, 1);
+        assertEq(preWithdrawAssets, 4);
+        assertEq(sharesNeeded, userShares);
+        assertEq(estimatedRemainingAssets, 3);
+        assertEq(actualRemainingAssets, 0);
+        assertNotEq(estimatedRemainingAssets, actualRemainingAssets);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+        uint256 poolBalanceBefore = asset.balanceOf(address(pool));
+        uint256 vaultAssetsBefore = vault.totalAssets();
+        uint256 vaultSupplyBefore = vault.totalSupply();
+        uint256 totalCollateralSharesBefore = pool.totalCollateralShares();
+        uint256 userDebtBefore = pool.debtBalanceOf(user);
+        uint256 totalScaledDebtBefore = pool.totalScaledDebt();
+        uint256 totalLiquidityBefore = pool.totalLiquidity();
+
+        vm.prank(user);
+        vm.expectRevert(LendingPool.HealthFactorTooLow.selector);
+        pool.withdrawCollateral(withdrawAmount);
+
+        assertEq(pool.collateralSharesOf(user), userShares);
+        assertEq(pool.totalCollateralShares(), totalCollateralSharesBefore);
+        assertEq(pool.debtBalanceOf(user), userDebtBefore);
+        assertEq(pool.totalScaledDebt(), totalScaledDebtBefore);
+        assertEq(pool.totalLiquidity(), totalLiquidityBefore);
+        assertEq(asset.balanceOf(user), userBalanceBefore);
+        assertEq(asset.balanceOf(address(pool)), poolBalanceBefore);
+        assertEq(vault.totalAssets(), vaultAssetsBefore);
+        assertEq(vault.totalSupply(), vaultSupplyBefore);
+        assertEq(vault.balanceOf(address(pool)), userShares);
+    }
+
+    function test_WithdrawCollateral_SafePartialWithdrawalSucceedsAfterDonation() public {
+        uint256 depositAmount = 10;
+        uint256 donationAmount = 10;
+        uint256 borrowAmount = 5;
+        uint256 withdrawAmount = 2;
+
+        vm.prank(lp);
+        pool.depositLiquidity(20);
+
+        vm.prank(user);
+        pool.depositCollateral(depositAmount);
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        uint256 userSharesBefore = pool.collateralSharesOf(user);
+        uint256 sharesNeeded = vault.previewWithdraw(withdrawAmount);
+        uint256 userAssetsBefore = vault.convertToAssets(userSharesBefore);
+        uint256 remainingAssetsBefore = vault.convertToAssets(userSharesBefore - sharesNeeded);
+
+        assertEq(userSharesBefore, 10);
+        assertEq(userAssetsBefore, 19);
+        assertNotEq(userAssetsBefore, userSharesBefore);
+        assertEq(sharesNeeded, 2);
+        assertEq(remainingAssetsBefore, 15);
+
+        vm.prank(user);
+        pool.borrow(borrowAmount);
+
+        uint256 userBalanceBefore = asset.balanceOf(user);
+
+        vm.prank(user);
+        pool.withdrawCollateral(withdrawAmount);
+
+        uint256 remainingShares = userSharesBefore - sharesNeeded;
+        uint256 remainingAssetsAfter = vault.convertToAssets(remainingShares);
+
+        assertEq(pool.collateralSharesOf(user), remainingShares);
+        assertEq(pool.totalCollateralShares(), remainingShares);
+        assertEq(asset.balanceOf(user), userBalanceBefore + withdrawAmount);
+        assertEq(pool.debtBalanceOf(user), borrowAmount);
+        assertEq(pool.getCollateralAssets(user), remainingAssetsAfter);
+        assertGe(remainingAssetsAfter, remainingAssetsBefore);
+        assertGe(pool.getHealthFactor(user), WAD);
+    }
+
+    function test_WithdrawCollateral_DebtFreeUserCanWithdrawAfterDonation() public {
+        uint256 depositAmount = 1;
+        uint256 donationAmount = 6;
+        uint256 withdrawAmount = 1;
+
+        vm.prank(user);
+        pool.depositCollateral(depositAmount);
+
+        vm.prank(user);
+        assertTrue(asset.transfer(address(vault), donationAmount));
+
+        uint256 userShares = pool.collateralSharesOf(user);
+        uint256 userAssets = vault.convertToAssets(userShares);
+        uint256 sharesNeeded = vault.previewWithdraw(withdrawAmount);
+        uint256 userBalanceBefore = asset.balanceOf(user);
+
+        assertEq(pool.debtBalanceOf(user), 0);
+        assertEq(userShares, 1);
+        assertEq(userAssets, 4);
+        assertNotEq(userAssets, userShares);
+        assertEq(sharesNeeded, userShares);
+
+        vm.prank(user);
+        pool.withdrawCollateral(withdrawAmount);
+
+        assertEq(pool.collateralSharesOf(user), 0);
+        assertEq(pool.totalCollateralShares(), 0);
+        assertEq(vault.balanceOf(address(pool)), 0);
+        assertEq(asset.balanceOf(user), userBalanceBefore + withdrawAmount);
     }
 
     /*//////////////////////////////////////////////////////////////

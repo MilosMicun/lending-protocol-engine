@@ -1,493 +1,214 @@
-# lending-protocol-engine
+# Lending Protocol Engine
 
-A modular DeFi lending protocol core built in Solidity and Foundry.
+An upgradeable overcollateralized lending protocol built with Solidity and Foundry, publicly deployed and validated through a representative on-chain flow on Ethereum Sepolia.
 
-Implements the core mechanics of overcollateralized lending:
+## Project status
 
-- ERC-4626 collateral vaults
-- oracle-aware health factor accounting
-- indexed/scaled debt accounting
-- WAD-based interest accrual
-- liquidation mechanics with explicit residual debt handling
-- fuzz and invariant-tested solvency guarantees
+| | |
+| --- | --- |
+| Network | Ethereum Sepolia (`11155111`) |
+| Canonical LendingPool | [`0x4Ba81845c2E130013EF2Be36e220cA1166E70873`](https://sepolia.etherscan.io/address/0x4Ba81845c2E130013EF2Be36e220cA1166E70873#code), an ERC-1967 proxy |
+| V1 implementation | [`0x4f5c7dC968602b54519F515576FeC936405CB940`](https://sepolia.etherscan.io/address/0x4f5c7dC968602b54519F515576FeC936405CB940#code) |
+| Upgrade authority | [Safe 1.4.1](https://sepolia.etherscan.io/address/0xe6E0B9B815666bE6B3dbbf441f678C9618196760), 2-of-2 threshold |
+| Verification | sdETH, sdUSD, CollateralVault, the V1 implementation, and ERC1967Proxy source are verified on Etherscan |
 
-This repository focuses on protocol accounting correctness, solvency preservation, and explicit state-transition safety rather than production feature completeness.
+The proxy is the user-facing pool and holds protocol state and custody; Etherscan automatically associates it with the verified implementation. The active upgrade authority is the Safe, and the pending authority is the zero address. No public V1-to-V1.1 upgrade has been executed.
 
----
+A representative Sepolia flow successfully deposited `10,000 sdUSD` of liquidity and `1 sdETH` of collateral, borrowed `1,000 sdUSD`, and partially repaid `250 sdUSD`. Approximately `750 sdUSD` of debt intentionally remains live and accrues interest as public protocol-state evidence. This was not a liquidation and does not represent comprehensive on-chain path coverage.
 
-# Design Goals
+## What this project demonstrates
 
-The protocol was designed around four primary constraints:
+- ERC-1967/UUPS proxy architecture with atomic proxy initialization
+- Safe-controlled upgrade authorization and a two-step authority-transfer design
+- ERC-4626 collateral custody, share accounting, and rounding-aware solvency protection
+- Indexed/scaled debt accounting and WAD-based interest accrual
+- Chainlink-compatible oracle validation and price normalization
+- Health-factor enforcement and collateral-capped liquidation mechanics
+- Unit, fuzz, invariant, integration, storage-layout, upgrade-preservation, and deployment-script testing
 
-- accounting correctness
-- solvency preservation
-- explicit risk modeling
-- invariant-tested state transitions
+## Quick links
 
-The implementation intentionally prioritizes protocol mechanics and system reasoning over UI, governance, or yield optimization features.
+- [Live Sepolia LendingPool](https://sepolia.etherscan.io/address/0x4Ba81845c2E130013EF2Be36e220cA1166E70873#code)
+- [Public deployment evidence](docs/SEPOLIA_DEPLOYMENT.md)
+- [Protocol specification](docs/protocol-spec.md)
+- [UUPS architecture and storage specification](docs/UPGRADEABILITY_V1.md)
+- [Safe upgrade runbook](docs/SAFE_UPGRADE_RUNBOOK.md)
 
----
-
-# Architecture
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│                        LendingPool.sol                       │
-│                                                              │
-│  depositCollateral()   withdrawCollateral()                  │
-│  borrow()              repay()                               │
-│  liquidate()           getHealthFactor()                     │
-│                                                              │
-│  ┌─────────────────┐   ┌────────────────┐                   │
-│  │ CollateralVault │   │ Borrow Engine  │                   │
-│  │    ERC-4626     │   │ scaledDebtOf[] │                   │
-│  │ shares/assets   │   │ borrowIndex    │                   │
-│  └────────┬────────┘   └───────┬────────┘                   │
-│           │                    │                             │
-│           └──────────┬─────────┘                            │
-│                      │                                       │
-│              ┌───────▼────────┐                              │
-│              │  OracleLib.sol │                              │
-│              │ staleness +    │                              │
-│              │ invalid round  │                              │
-│              └───────┬────────┘                              │
-│                      │                                       │
-│              ┌───────▼────────┐                              │
-│              │  IPriceFeed    │                              │
-│              │ (Chainlink     │                              │
-│              │ compatible)    │                              │
-│              └────────────────┘                              │
-└──────────────────────────────────────────────────────────────┘
-```
-
-## Components
-
-| Contract | Responsibility |
-|---|---|
-| `LendingPool.sol` | Core lending lifecycle: borrow, repay, liquidate, health factor |
-| `CollateralVault.sol` | ERC-4626 collateral custody and share accounting |
-| `OracleLib.sol` | Oracle validation, staleness protection, WAD normalization |
-| `IPriceFeed.sol` | Chainlink-compatible oracle interface |
-| `MockV3Aggregator.sol` | Deterministic testing oracle |
-
----
-
-# Protocol State Machine
-
-A user position moves through explicit solvency states.
+## Architecture
 
 ```text
-                    depositCollateral()
-                          │
-                          ▼
-                     [COLLATERAL]
-                    /            \
-            borrow()              withdrawCollateral()
-               │                       │
-               ▼                       ▼
-          [BORROWING]             [WITHDRAWN]
-         /     |      \
-  repay()   healthy   unhealthy (HF < 1e18)
-     │                    │
-     ▼                    ▼
-[REPAID]           liquidate()
-                        │
-                   ┌────┴────┐
-                   │         │
-              solvent   residual debt
-               close       remains
+                              2-of-2 Safe
+                                   │ authorizes UUPS upgrades
+                                   ▼
+Users ─────────► ERC1967Proxy / canonical LendingPool ◄──── sdUSD
+                 state, sdUSD custody, vault shares          demo liquidity/debt
+                      │ delegates          │ reads
+                      ▼                    ▼
+                 LendingPool V1       Chainlink ETH/USD
+                 implementation       price feed
+                      code
+
+                 ERC1967Proxy ──────► CollateralVault ◄──── sdETH
+                    deposits           ERC-4626              demo collateral
+                                       sdETH custody
 ```
 
-## Health Factor
+- **ERC1967 proxy:** the canonical user-facing address. It retains LendingPool state, sdUSD custody, CollateralVault shares, and pool-to-vault approvals.
+- **LendingPool implementation:** the UUPS code target used through delegate calls. It is not a pool or custody address.
+- **CollateralVault:** a separately deployed, non-upgradeable ERC-4626 vault that holds sdETH; the proxy owns its shares and accounts for user claims.
+- **Oracle:** the external Chainlink Sepolia ETH/USD feed prices ETH-like demo collateral in USD-like demo debt units.
+- **Safe:** the external 2-of-2 upgrade authority. The deployer and demo actor do not receive implicit upgrade permission.
+- **Demo assets:** fixed-supply, 18-decimal Sepolia-only sdETH collateral and sdUSD debt/liquidity tokens. They are not production assets.
 
-The protocol uses a single solvency metric:
+Only `LendingPool` is upgradeable. Its implementation constructor disables initializers. The deployment script supplies nonempty initialization calldata to the proxy constructor, so the proxy and its ten configuration values—including the initial upgrade authority—are initialized atomically.
+
+## Protocol mechanics
+
+### Position lifecycle and health factor
+
+Users supply sdUSD liquidity, deposit collateral through the pool into the vault, borrow against that collateral, repay debt, and withdraw only while remaining solvent. An unhealthy third-party position can be liquidated.
 
 ```text
-HF = (collateralValueUSD × LTV_THRESHOLD) / currentDebtUSD
+healthFactor =
+    collateralValue × liquidationThreshold / currentDebt
+
+healthFactor >= 1e18  healthy
+healthFactor <  1e18  liquidatable
 ```
+
+Debt-free positions return the maximum `uint256` health factor. Collateral values come from live, validated oracle reads; they are not cached. Borrow limits use the separately configured LTV threshold, while liquidation eligibility uses the liquidation threshold.
+
+### ERC-4626 collateral accounting and rounding
+
+`CollateralVault` treats shares as ownership and assets as value. The pool owns the vault shares and records each user's share claim in `collateralSharesOf`.
+
+A nonzero collateral deposit that would mint zero shares reverts atomically. Withdrawals calculate their share cost with ceiling-rounded `previewWithdraw()` and, for an indebted user, test solvency using the assets represented by the remaining shares. This protects solvency when the vault exchange rate is not 1:1.
+
+Liquidation also uses ceiling-rounded `previewWithdraw()` so the share debit is sufficient for the computed asset seizure. `redeem()` then transfers the assets produced by those shares; the emitted seized-asset amount is the actual vault output.
+
+### Indexed debt
+
+The protocol avoids updating every borrower as time passes. It stores one global `borrowIndex` and scaled balances per borrower:
 
 ```text
-HF ≥ 1e18  →  position is healthy
-HF < 1e18  →  position is liquidatable
+scaledDebtAdded = borrowedAmount × WAD / borrowIndex
+currentDebt     = scaledDebt × currentBorrowIndex / WAD
 ```
 
-All collateral valuation is performed using live oracle reads at execution time. No collateral value is cached between calls.
+`totalScaledDebt` provides the same accumulator model for system debt. Integer division makes the model explicitly rounding-sensitive; repayment and liquidation tests cover the resulting scaled-debt behavior.
 
----
+### Interest rate and accrual
 
-# Collateral Vault — ERC-4626
-
-Collateral is held inside an ERC-4626 compliant vault.
-
-## Why ERC-4626?
-
-The standard provides:
-
-- deterministic share/accounting semantics
-- separation between ownership and asset value
-- standardized rounding behavior
-- composability with broader DeFi infrastructure
-
-The vault treats:
-
-- shares as ownership
-- assets as value
-
-This distinction becomes critical once vault exchange rates diverge over time.
-
-## Liquidation Rounding Safety
-
-Liquidation paths intentionally use `previewWithdraw()` (ceiling rounding).
-
-This ensures a liquidator receives at least the required collateral amount during seizure operations.
-
-Using floor-rounding conversions during liquidation would systematically under-seize collateral and introduce protocol accounting drift across repeated liquidation events.
-
----
-
-# Debt Accounting Model — Indexed / Scaled Debt
-
-Debt is tracked using a global borrow index and per-user scaled balances inspired by accumulator models used in lending protocols such as Aave and Compound.
-
-## Storage
-
-```solidity
-uint256 public borrowIndex;
-uint256 public lastBorrowIndexUpdate;
-
-mapping(address => uint256) public scaledDebtOf;
-```
-
----
-
-## Debt Lifecycle
-
-### At borrow
+Rates and indices use WAD (`1e18`) precision. At an index calculation:
 
 ```text
-scaledDebtOf[user] = principal × WAD / borrowIndex
+storedDebt = totalScaledDebt × borrowIndex / WAD
+
+utilization = 0                                 if totalLiquidity = 0
+utilization = WAD                               if storedDebt >= totalLiquidity
+utilization = storedDebt × WAD / totalLiquidity otherwise
+
+annualRate = baseBorrowRate + utilization × borrowRateSlope / WAD
 ```
 
-### Current debt at any point in time
+Utilization is capped at `WAD`. Initialization requires `baseBorrowRate + borrowRateSlope <= WAD`, so valid configurations cap the linear annual rate at `WAD`; this is not a kink model.
+
+For elapsed time with nonzero scaled debt, `currentBorrowIndex()` applies a second-order approximation:
 
 ```text
-currentDebt[user] = scaledDebtOf[user] × borrowIndex / WAD
+interestFactor  = annualRate × elapsedSeconds / 365 days
+secondOrderTerm = interestFactor² / (2 × WAD)
+currentIndex    = borrowIndex × (WAD + interestFactor + secondOrderTerm) / WAD
 ```
 
----
+This is neither continuous nor per-block compounding. `borrow()`, `repay()`, and `liquidate()` checkpoint the stored index before mutating debt. Collateral operations, liquidity operations, view calls, and the passage of time do not checkpoint it.
 
-## Why this model?
+The elapsed interval uses utilization observed at the later debt checkpoint; historical utilization is not integrated. Because liquidity changes do not checkpoint first, a deposit can lower—and a withdrawal can raise—the rate applied to the entire interval since the prior debt checkpoint. This is a documented V1 limitation.
 
-Naive lending systems mutate every borrower position over time.
+### Liquidation
 
-Indexed accounting avoids:
-
-- per-user interest mutation
-- O(n) debt updates
-- scalability bottlenecks
-- looping accrual patterns
-
-Debt growth becomes globally composable and gas-efficient.
-
----
-
-# Interest Accrual Model
-
-The borrow index grows over time through a WAD-based accumulator.
+For a position below the liquidation threshold, a third-party liquidator repays debt and receives collateral with the configured bonus:
 
 ```text
-Δt = block.timestamp − lastBorrowIndexUpdate
-r  = annualRate / SECONDS_PER_YEAR
+repayValueWithBonus = actualRepay × (1 + liquidationBonus)
+collateralToSeize   = repayValueWithBonus / oraclePrice
 ```
 
-The implementation uses a second-order approximation to reduce long-window divergence present in naive linear accrual models.
+If the requested seizure exceeds the borrower's collateral, the protocol caps the seizure at available collateral and reduces the repay amount to the value supportable after the bonus. Any uncovered residual debt remains visible in scaled-debt accounting; it is not silently erased. A zero-value capped repayment reverts with `BadDebt`.
 
-## Critical Invariant
+No liquidation has been executed as part of the public Sepolia demonstration.
 
-`_updateBorrowIndex()` executes before every debt mutation:
+### Oracle validation and units
 
-- `borrow()`
-- `repay()`
-- `liquidate()`
+All protocol price reads use `OracleLib.getFreshPriceWad()`. A read must have:
 
-This prevents debt reads and writes against stale index state.
+- a positive answer;
+- a nonzero timestamp that is not in the future;
+- an update within the configured maximum-staleness window; and
+- `answeredInRound >= roundId`.
 
-The ordering is enforced structurally in code, not by convention.
+Feeds with 0–18 decimals are normalized to WAD. Unsupported decimals, normalization overflow, and a zero normalized result revert.
 
----
+Oracle normalization does not normalize token raw units against each other. The deployed ETH/USD semantics are appropriate for the 18-decimal ETH-like sdETH collateral and USD-like sdUSD debt asset; arbitrary token and feed combinations require an explicit decimal and quotation compatibility review.
 
-# Liquidation Engine
+## Initialization and upgrade authority
 
-A position becomes liquidatable when:
+The V1 initializer receives nine dependency/economic values plus `initialUpgradeAuthority`. It validates and fixes the oracle, vault, debt asset, staleness window, risk parameters, and rate parameters at initialization. V1 has no ordinary post-deployment economic-parameter setters.
 
-```text
-HF < 1e18
-```
+Upgrade authorization is separate from economic configuration:
 
----
+1. The active authority may propose a nonzero pending authority.
+2. Only that pending address may accept, at which point it becomes active and the pending value returns to zero.
 
-## Liquidation Mechanics
+A pending authority cannot upgrade before acceptance, and there is no renounce or zero-address transfer path. `_authorizeUpgrade()` accepts only the active authority. For the public deployment that authority is the 2-of-2 Safe; the current pending authority is zero.
 
-```text
-collateralToSeize =
-debtToCover × (1 + LIQUIDATION_BONUS) / oraclePrice
-```
+The repository includes tooling and tests for preparing and validating a minimal storage-compatible V1.1 upgrade, but no public V1-to-V1.1 upgrade has occurred. See the [upgradeability specification](docs/UPGRADEABILITY_V1.md) and [Safe runbook](docs/SAFE_UPGRADE_RUNBOOK.md).
 
-The liquidation bonus compensates liquidators for:
+## Testing strategy
 
-- gas expenditure
-- execution risk
-- volatile market conditions
+The Foundry suite is organized by evidence type rather than a headline aggregate count:
 
-Without a liquidation incentive, unhealthy positions may remain unresolved during stress events.
+- **Unit:** initialization, proxy authority, UUPS behavior, frozen storage layout, lending actions, interest accrual, oracle failures, ERC-4626 accounting, and liquidation paths.
+- **Fuzz:** borrowing and LTV rejection, withdrawal solvency after vault exchange-rate changes, partial and excess repayment, scaled-debt rounding after accrual, healthy-position rejection, collateral-capped liquidation, and liquidity consistency.
+- **Invariant:** accounting identities, debt isolation, index monotonicity, custody coverage, healthy-position liquidation rejection, action-level withdrawal checks, and campaign reachability through a real proxy.
+- **Integration:** accounting and custody preservation across a real proxy upgrade.
+- **Deployment and upgrade scripts:** dependency preflight, atomic initialization, configuration readback, public-flow validation, upgrade preparation, state fingerprinting, authority execution, and read-only post-upgrade verification.
 
----
-
-## Residual Debt Handling
-
-When:
-
-```text
-collateralToSeize > collateralBalance
-```
-
-the protocol:
-
-- caps repayment to available collateral coverage
-- closes the operational position
-- leaves residual debt explicitly non-zero inside the debt accounting system
-
-Residual debt is intentionally not silently cleared.
-
-This preserves visibility into undercollateralized positions and prevents insolvency from being hidden behind accounting mutations.
-
----
-
-## Seizure Rounding
-
-Collateral seizure intentionally uses ERC-4626 ceiling rounding behavior.
-
-The protocol must seize at least the calculated collateral amount, never less.
-
-Even small under-seizures compound into meaningful accounting loss across repeated liquidation events.
-
----
-
-# Oracle Integration
-
-All price reads pass through:
-
-```solidity
-OracleLib.getFreshPriceWad()
-```
-
-The library performs three validations:
-
-1. Invalid price check
-2. Staleness check
-3. Invalid round detection
-
-All oracle values are normalized to WAD precision regardless of feed decimals.
-
-## Oracle Safety Checks
-
-```solidity
-if (answer <= 0) revert InvalidPrice();
-
-if (
-    updatedAt == 0 ||
-    block.timestamp - updatedAt > maxStaleness
-) revert StalePrice();
-
-if (answeredInRound < roundId)
-    revert InvalidRound();
-```
-
-Oracle freshness is treated as a solvency requirement, not a UI concern.
-
-Health factor checks remain pure read paths by design. Coupling solvency reads with state mutation would unnecessarily complicate keeper systems and protocol monitoring.
-
----
-
-# Security Properties
-
-## Checks → Effects → Interactions
-
-All state-mutating functions follow CEI ordering.
-
-External token transfers occur only after internal accounting updates complete.
-
-This ordering reduces exposure to callback-based and hook-based reentrancy vectors.
-
----
-
-## Solvency Enforcement
-
-The protocol enforces:
-
-- borrow limits
-- health factor constraints
-- liquidation thresholds
-
-Collateral cannot be withdrawn if doing so would push:
-
-```text
-HF < 1e18
-```
-
----
-
-## Index Monotonicity
-
-`borrowIndex` is strictly non-decreasing.
-
-Invariant tests verify that no sequence of accrual operations can decrease the index regardless of time delta.
-
----
-
-# Test Suite
-
-```text
-82 tests — all passing
-
-56  unit  (LendingPool)
- 7  unit  (CollateralVault)
-10  fuzz
- 9  invariant
-──
-82  total
-```
-
-## Coverage Includes
-
-### Unit Tests
-
-- ERC-4626 share accounting
-- borrow limits
-- partial/full repay
-- liquidation paths
-- residual debt handling
-- oracle staleness
-- invalid oracle rounds
-- multi-user debt isolation
-
-### Integration Tests
-
-- full lifecycle:
-  deposit → borrow → time warp → repay
-
-- liquidation after compounded interest accrual
-- residual debt correctness after partial repay
-- borrow rejection after accrued debt growth
-
-### Fuzz Tests
-
-- LTV ceiling enforcement
-- debt non-negativity
-- index monotonicity
-- share/asset round-trip correctness
-
-### Invariant Tests
-
-- health factor consistency
-- stale oracle rejection
-- index-first debt mutation ordering
-- residual debt remains non-zero after undercollateralized liquidation
-
----
-
-# Known Limitations
-
-These limitations are documented intentionally and reflect scoped engineering decisions.
-
----
-
-## LP Yield Accounting Not Implemented
-
-Borrower debt accrues correctly, but lender-side yield distribution is intentionally omitted.
-
-`totalLiquidity` does not grow over time.
-
-Supporting LP yield correctly would require either:
-
-- a second accumulator index
-- or explicit distribution accounting
-
-This concern is intentionally separated from borrower accounting.
-
----
-
-## Fixed Interest Rate
-
-The protocol uses a fixed borrow rate.
-
-A utilization-based kink model (Aave/Compound style) is the intended production direction but was intentionally excluded from the current scope.
-
-The accumulator architecture itself is rate-agnostic.
-
----
-
-## No Liquidation Circuit Breaker
-
-The protocol does not implement:
-
-- pause controls
-- liquidation throttling
-- per-block liquidation caps
-
-Production systems typically require additional protection against oracle manipulation and cascading liquidation scenarios.
-
----
-
-## Single Collateral Asset
-
-Each deployment supports a single collateral asset.
-
-Multi-asset collateral support would require:
-
-- collateral registries
-- weighted valuation models
-- isolation mode logic
-- eMode-style risk grouping
-
-This is intentionally reserved for future iterations.
-
----
-
-# Running the Protocol
+The invariant configuration uses 64 runs at depth 128 with `fail_on_revert = false`; reachability assertions ensure selected successful actions occur at campaign level. These tests provide scoped evidence, not formal verification or proof over arbitrary integrations.
 
 ```bash
-# Build
 forge build
-
-# Full test suite
 forge test -vv
-
-# Fuzz + invariant suite
 forge test --match-path "test/fuzz/*" -vv
 forge test --match-path "test/invariant/*" -vv
-
-# Gas snapshot
 forge snapshot
 ```
 
-## Requirements
+Requirements: Solidity `0.8.24` and Foundry (`forge`, `cast`, `anvil`).
+
+## Asset and callback boundary
+
+V1 is designed for standard, exact-transfer, non-rebasing ERC-20 assets whose raw units and oracle quotation are compatible. It does not reconcile nominal accounting changes against token balance deltas, so fee-on-transfer, taxed, deflationary, reflective, or rebasing assets can invalidate accounting and solvency assumptions.
+
+`SafeERC20` improves compatibility with common ERC-20 return conventions. It does not make arbitrary or adversarial tokens safe, prevent callbacks, or provide reentrancy protection. The production contracts have no general reentrancy guard, and their external-call ordering is path-specific. Asset selection is therefore a deployment-time trust and compatibility boundary, documented in the [asset dependency preflight](docs/SAFE_UPGRADE_RUNBOOK.md#asset-dependency-preflight).
+
+## Known limitations and non-claims
+
+- This repository and its Sepolia deployment are not represented as audited or production ready.
+- The public flow covers deposit, collateral deposit, borrow, and partial repayment—not every protocol path.
+- No public liquidation or public V1-to-V1.1 upgrade has been executed.
+- sdETH and sdUSD are fixed-supply testnet demonstration assets, not production assets.
+- Borrower debt accrues, but lender yield distribution is not implemented; `totalLiquidity` does not grow with accrued interest.
+- Liquidity changes do not checkpoint the borrow index, and later-checkpoint utilization applies to the prior elapsed interval.
+- Each pool deployment supports one collateral asset.
+- There are no pause controls, liquidation throttles, per-block caps, general reentrancy guard, or governance-controlled economic setters.
+- Safe control reduces unilateral upgrade authority but does not remove signer, key-management, transaction-review, or operational risk.
+- Residual debt can remain after collateral-capped liquidation and has no separate socialization or reserve mechanism.
+
+## Stack
 
 - Solidity `0.8.24`
-- Foundry (`forge`, `cast`, `anvil`)
-
----
-
-# Future Direction
-
-The accounting core was intentionally designed to support extension into more complex lending and RWA financing systems without restructuring debt primitives or oracle infrastructure.
-
----
-
-# Stack
-
-- Solidity `0.8.24`
-- Foundry (`forge`, `cast`, `anvil`)
-- OpenZeppelin (`ERC4626`, `SafeERC20`)
-- Chainlink `AggregatorV3Interface`
+- Foundry
+- OpenZeppelin `ERC4626`, `SafeERC20`, `Initializable`, `UUPSUpgradeable`, and `ERC1967Proxy`
+- Chainlink-compatible `AggregatorV3Interface`
 - forge-std
