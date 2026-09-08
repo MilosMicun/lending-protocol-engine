@@ -33,6 +33,7 @@ contract LendingPoolGoldenStorageLayoutTest is Test, LendingPoolProxyFixture {
 
     string internal constant V1_ARTIFACT = "out/LendingPool.sol/LendingPool.json";
     string internal constant V1_1_ARTIFACT = "out/LendingPoolV1_1.sol/LendingPoolV1_1.json";
+    string internal constant V1_2_ARTIFACT = "out/LendingPoolV1_2.sol/LendingPoolV1_2.json";
 
     uint256 internal constant FROZEN_ENTRY_COUNT = 18;
     uint256 internal constant SCALED_DEBT_OF_SEED = 15;
@@ -52,6 +53,28 @@ contract LendingPoolGoldenStorageLayoutTest is Test, LendingPoolProxyFixture {
 
     function test_V1_1CompilerLayoutMatchesFrozenOracleAndAddsNoStorage() public view {
         _assertCompilerLayout(V1_1_ARTIFACT, "LendingPool V1.1");
+    }
+
+    function test_V1_2CompilerLayoutMatchesFrozenOracleAndAddsNoStorage() public view {
+        _assertCompilerLayout(V1_2_ARTIFACT, "LendingPool V1.2");
+    }
+
+    function test_V1_2RetainsEveryV1SelectorAndAddsOnlyVersion() public view {
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        string memory v1Artifact = vm.readFile(string.concat(vm.projectRoot(), "/", V1_ARTIFACT));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
+        string memory v12Artifact = vm.readFile(string.concat(vm.projectRoot(), "/", V1_2_ARTIFACT));
+        string[] memory v1Selectors = vm.parseJsonKeys(v1Artifact, ".methodIdentifiers");
+        string[] memory v12Selectors = vm.parseJsonKeys(v12Artifact, ".methodIdentifiers");
+
+        assertEq(v12Selectors.length, v1Selectors.length + 1, "V1.2 external selector count");
+
+        for (uint256 i; i < v1Selectors.length; ++i) {
+            string memory expected = _methodIdentifier(v1Artifact, v1Selectors[i]);
+            assertEq(_methodIdentifier(v12Artifact, v1Selectors[i]), expected, v1Selectors[i]);
+        }
+
+        assertGt(bytes(_methodIdentifier(v12Artifact, "version()")).length, 0);
     }
 
     function test_FrozenMappingSeedsLocateRepresentativeNonzeroLeaves() public {
@@ -153,6 +176,11 @@ contract LendingPoolGoldenStorageLayoutTest is Test, LendingPoolProxyFixture {
 
     function _typeLabel(string memory artifact, string memory typeId) internal pure returns (string memory) {
         return vm.parseJsonString(artifact, string.concat(".storageLayout.types['", typeId, "'].label"));
+    }
+
+    function _methodIdentifier(string memory artifact, string memory signature) internal pure returns (string memory) {
+        string memory path = string.concat(".methodIdentifiers['", signature, "']");
+        return vm.parseJsonString(artifact, path);
     }
 
     function _frozenEntry(uint256 index) internal pure returns (FrozenEntry memory) {

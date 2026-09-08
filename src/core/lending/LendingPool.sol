@@ -6,6 +6,7 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IPriceFeed} from "../../interfaces/IPriceFeed.sol";
 import {OracleLib} from "../../lib/OracleLib.sol";
 
@@ -106,6 +107,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
             revert ZeroAddress();
         }
 
+        _validateDebtAsset(debtAsset_);
+
         if (maxPriceStaleness_ == 0) {
             revert InvalidStalenessWindow();
         }
@@ -183,24 +186,33 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function debtBalanceOf(address user) public view returns (uint256) {
-        return scaledDebtOf[user] * currentBorrowIndex() / WAD;
+        return _scaledToDebt(scaledDebtOf[user], currentBorrowIndex());
     }
 
     function totalDebt() public view returns (uint256) {
-        return totalScaledDebt * currentBorrowIndex() / WAD;
+        return _scaledToDebt(totalScaledDebt, currentBorrowIndex());
     }
 
     function currentBorrowIndex() public view returns (uint256) {
         uint256 timeElapsed = block.timestamp - lastBorrowIndexUpdate;
 
         if (timeElapsed == 0) {
+            _validateAccountingDomain(borrowIndex);
             return borrowIndex;
         }
 
         if (totalScaledDebt == 0) {
+            _validateAccountingDomain(borrowIndex);
             return borrowIndex;
         }
 
+        uint256 accruedIndex = _accruedBorrowIndex(timeElapsed);
+        _validateAccountingDomain(accruedIndex);
+
+        return accruedIndex;
+    }
+
+    function _accruedBorrowIndex(uint256 timeElapsed) internal view virtual returns (uint256) {
         uint256 rate = currentBorrowRate();
         uint256 interestFactor = rate * timeElapsed / SECONDS_PER_YEAR;
         uint256 secondOrderTerm = interestFactor * interestFactor / (2 * WAD);
@@ -217,13 +229,13 @@ contract LendingPool is Initializable, UUPSUpgradeable {
             return WAD;
         }
 
-        return debt * WAD / totalLiquidity;
+        return _debtToUtilization(debt, totalLiquidity);
     }
 
     function currentBorrowRate() public view returns (uint256) {
         uint256 utilization = utilizationRate();
 
-        return baseBorrowRate + utilization * borrowRateSlope / WAD;
+        return baseBorrowRate + _variableBorrowRate(utilization, borrowRateSlope);
     }
 
     function depositCollateral(uint256 amount) external {
@@ -320,15 +332,7 @@ contract LendingPool is Initializable, UUPSUpgradeable {
 
         if (collateralSharesOf[msg.sender] == 0) revert InsufficientCollateral();
 
-        uint256 maxBorrow = maxBorrowOf(msg.sender);
-        uint256 newDebt = debtBalanceOf(msg.sender) + amount;
-
-        if (newDebt > maxBorrow) revert BorrowExceedsLimit();
-
-        uint256 available = availableLiquidity();
-        if (amount > available) revert InsufficientLiquidity();
-
-        uint256 scaledAmount = amount * WAD / borrowIndex;
+        (uint256 scaledAmount, uint256 newDebt) = _prepareBorrow(msg.sender, amount);
 
         scaledDebtOf[msg.sender] += scaledAmount;
         totalScaledDebt += scaledAmount;
@@ -347,18 +351,7 @@ contract LendingPool is Initializable, UUPSUpgradeable {
         if (debt == 0) revert NoDebt();
 
         uint256 repayAmount = amount > debt ? debt : amount;
-        uint256 newDebt = debt - repayAmount;
-        uint256 userScaledDebt = scaledDebtOf[msg.sender];
-
-        if (repayAmount == debt) {
-            scaledDebtOf[msg.sender] = 0;
-            totalScaledDebt -= userScaledDebt;
-        } else {
-            uint256 scaledRepayAmount = repayAmount * WAD / borrowIndex;
-
-            scaledDebtOf[msg.sender] -= scaledRepayAmount;
-            totalScaledDebt -= scaledRepayAmount;
-        }
+        uint256 newDebt = _applyDebtRepayment(msg.sender, debt, repayAmount);
 
         debtAsset.safeTransferFrom(msg.sender, address(this), repayAmount);
 
@@ -404,17 +397,7 @@ contract LendingPool is Initializable, UUPSUpgradeable {
 
         uint256 seizedShares = vault.previewWithdraw(collateralToSeizeAssets);
 
-        uint256 borrowerScaledDebt = scaledDebtOf[borrower];
-
-        if (actualRepay == debt) {
-            scaledDebtOf[borrower] = 0;
-            totalScaledDebt -= borrowerScaledDebt;
-        } else {
-            uint256 scaledRepayAmount = actualRepay * WAD / borrowIndex;
-
-            scaledDebtOf[borrower] -= scaledRepayAmount;
-            totalScaledDebt -= scaledRepayAmount;
-        }
+        _applyDebtRepayment(borrower, debt, actualRepay);
 
         collateralSharesOf[borrower] -= seizedShares;
         totalCollateralShares -= seizedShares;
@@ -480,7 +463,99 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function _storedTotalDebt() internal view returns (uint256) {
-        return totalScaledDebt * borrowIndex / WAD;
+        return _scaledToDebt(totalScaledDebt, borrowIndex);
+    }
+
+    function _scaledToDebt(uint256 scaledAmount, uint256 index) internal pure virtual returns (uint256) {
+        return scaledAmount * index / WAD;
+    }
+
+    function _debtToUtilization(uint256 debt, uint256 liquidity) internal pure virtual returns (uint256) {
+        return debt * WAD / liquidity;
+    }
+
+    function _variableBorrowRate(uint256 utilization, uint256 slope) internal pure virtual returns (uint256) {
+        return utilization * slope / WAD;
+    }
+
+    function _prepareBorrow(address user, uint256 amount)
+        internal
+        view
+        returns (uint256 scaledAmount, uint256 newDebt)
+    {
+        uint256 maxBorrow = maxBorrowOf(user);
+        uint256 requestedPostBorrowDebt = debtBalanceOf(user) + amount;
+
+        if (requestedPostBorrowDebt > maxBorrow) revert BorrowExceedsLimit();
+
+        uint256 available = availableLiquidity();
+        if (amount > available) revert InsufficientLiquidity();
+
+        scaledAmount = _scaledAmountForBorrow(amount, borrowIndex);
+        _validateAccountingDomain(borrowIndex);
+
+        uint256 normalizedPostBorrowDebt =
+            _scaledToDebtForBorrowAdmission(scaledDebtOf[user] + scaledAmount, borrowIndex);
+        if (normalizedPostBorrowDebt > maxBorrow) revert BorrowExceedsLimit();
+
+        uint256 normalizedPostBorrowTotalDebt =
+            _scaledToDebtForBorrowAdmission(totalScaledDebt + scaledAmount, borrowIndex);
+        if (normalizedPostBorrowTotalDebt > totalLiquidity) revert InsufficientLiquidity();
+
+        newDebt =
+            requestedPostBorrowDebt > normalizedPostBorrowDebt ? requestedPostBorrowDebt : normalizedPostBorrowDebt;
+    }
+
+    function _applyDebtRepayment(address user, uint256 displayedDebt, uint256 repayment)
+        internal
+        returns (uint256 newDebt)
+    {
+        uint256 userScaledDebt = scaledDebtOf[user];
+
+        if (repayment == displayedDebt) {
+            scaledDebtOf[user] = 0;
+            totalScaledDebt -= userScaledDebt;
+            return 0;
+        } else {
+            uint256 scaledRepayAmount = _scaledAmountForPartialRepayment(repayment, borrowIndex);
+
+            scaledDebtOf[user] -= scaledRepayAmount;
+            totalScaledDebt -= scaledRepayAmount;
+        }
+
+        return _reportedDebtAfterPartialRepayment(user, displayedDebt, repayment);
+    }
+
+    function _scaledAmountForBorrow(uint256 amount, uint256 index) internal pure virtual returns (uint256) {
+        return amount * WAD / index;
+    }
+
+    function _scaledToDebtForBorrowAdmission(uint256 scaledAmount, uint256 index) internal pure returns (uint256) {
+        return Math.mulDiv(scaledAmount, index, WAD, Math.Rounding.Floor);
+    }
+
+    function _scaledAmountForPartialRepayment(uint256 repayment, uint256 index)
+        internal
+        pure
+        virtual
+        returns (uint256)
+    {
+        return repayment * WAD / index;
+    }
+
+    function _reportedDebtAfterPartialRepayment(address, uint256 displayedDebt, uint256 repayment)
+        internal
+        view
+        virtual
+        returns (uint256)
+    {
+        return displayedDebt - repayment;
+    }
+
+    function _validateDebtAsset(address) internal view virtual {}
+
+    function _validateAccountingDomain(uint256) internal pure virtual {
+        // V1 and V1.1 intentionally retain their unrestricted historical arithmetic domain.
     }
 
     function _authorizeUpgrade(address) internal view override {

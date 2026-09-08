@@ -14,3 +14,4 @@ line_length = 120
 [invariant]
 runs = 64
 depth = 128
+fail_on_revert = true

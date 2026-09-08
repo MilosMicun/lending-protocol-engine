@@ -9,6 +9,7 @@ import {LendingPoolProxyFixture} from "../helpers/LendingPoolProxyFixture.sol";
 
 import {CollateralVault} from "../../src/core/vault/CollateralVault.sol";
 import {LendingPool} from "../../src/core/lending/LendingPool.sol";
+import {LendingPoolV1_2} from "../../src/core/lending/LendingPoolV1_2.sol";
 import {LendingPoolHandler} from "./LendingPoolHandler.t.sol";
 
 contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
@@ -58,7 +59,8 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
             initialUpgradeAuthority: address(this)
         });
 
-        (pool, poolImplementation) = _deployLendingPoolProxy(config);
+        poolImplementation = _newImplementation();
+        pool = _deployLendingPoolProxy(poolImplementation, config);
 
         address[] memory users = new address[](3);
         users[0] = user1;
@@ -90,13 +92,20 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
 
     function invariant_TotalDebtApproximatelyEqualsSumOfUserDebt() public view {
         uint256 sum;
+        uint256 nonzeroAccounts;
 
         for (uint256 i = 0; i < handler.userCount(); i++) {
             address user = handler.users(i);
             sum += pool.debtBalanceOf(user);
+            if (pool.scaledDebtOf(user) != 0) ++nonzeroAccounts;
         }
 
-        assertApproxEqAbs(pool.totalDebt(), sum, handler.userCount());
+        assertGe(pool.totalDebt(), sum);
+        if (nonzeroAccounts == 0) {
+            assertEq(pool.totalDebt(), 0);
+        } else {
+            assertLe(pool.totalDebt() - sum, nonzeroAccounts - 1);
+        }
     }
 
     function invariant_TotalCollateralSharesEqualsSumOfUserShares() public view {
@@ -177,5 +186,15 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
             handler.successfulLiquidationCalls() + handler.expectedRejectedLiquidationCalls(),
             handler.attemptedLiquidationCalls()
         );
+    }
+
+    function _newImplementation() internal virtual returns (LendingPool) {
+        return new LendingPool();
+    }
+}
+
+contract LendingPoolV1_2InvariantTest is LendingPoolInvariantTest {
+    function _newImplementation() internal override returns (LendingPool) {
+        return new LendingPoolV1_2();
     }
 }

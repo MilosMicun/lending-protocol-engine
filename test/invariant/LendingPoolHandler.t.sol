@@ -104,10 +104,20 @@ contract LendingPoolHandler is Test {
         uint256 maxBorrow = pool.maxBorrowOf(user);
         uint256 debt = pool.debtBalanceOf(user);
         uint256 remainingBorrowCapacity = maxBorrow - debt;
-        _ensureAvailableLiquidity(remainingBorrowCapacity);
+        uint256 debtQuantum = _ceilDiv(pool.currentBorrowIndex(), WAD);
 
-        uint256 lowerBound = (remainingBorrowCapacity + 1) / 2;
-        amount = bound(amount, lowerBound, remainingBorrowCapacity);
+        if (remainingBorrowCapacity <= debtQuantum) {
+            uint256 additionalCollateral = _ceilDiv((debtQuantum + 1) * BPS, pool.ltvBps());
+            _depositCollateral(user, additionalCollateral);
+            maxBorrow = pool.maxBorrowOf(user);
+            remainingBorrowCapacity = maxBorrow - debt;
+        }
+
+        uint256 safeBorrowCapacity = remainingBorrowCapacity - debtQuantum;
+        _ensureAvailableLiquidity(safeBorrowCapacity + debtQuantum);
+
+        uint256 lowerBound = (safeBorrowCapacity + 1) / 2;
+        amount = bound(amount, lowerBound, safeBorrowCapacity);
 
         attemptedBorrowCalls++;
         vm.prank(user);
@@ -123,7 +133,8 @@ contract LendingPoolHandler is Test {
         uint256 debt = pool.debtBalanceOf(user);
         if (debt == 0) return;
 
-        amount = bound(amount, 1, debt);
+        uint256 minimumScaledBurn = _ceilDiv(pool.currentBorrowIndex(), WAD);
+        amount = minimumScaledBurn < debt ? bound(amount, minimumScaledBurn, debt) : debt;
 
         asset.mint(user, amount);
 
@@ -210,7 +221,8 @@ contract LendingPoolHandler is Test {
 
         uint256 debt = pool.debtBalanceOf(borrower);
 
-        repayAmount = bound(repayAmount, 1, debt);
+        uint256 minimumScaledBurn = _ceilDiv(pool.currentBorrowIndex(), WAD);
+        repayAmount = minimumScaledBurn < debt ? bound(repayAmount, minimumScaledBurn, debt) : debt;
 
         asset.mint(address(this), repayAmount);
         asset.approve(address(pool), repayAmount);
@@ -225,6 +237,11 @@ contract LendingPoolHandler is Test {
             // BadDebt() has no arguments, so its canonical payload is exactly the four-byte selector.
             // Collateral worth one wei cannot cover a positive repayment after the liquidation bonus.
             if (selector == LendingPool.BadDebt.selector && reason.length == 4) {
+                expectedRejectedLiquidationCalls++;
+                return;
+            }
+
+            if (selector == bytes4(keccak256("ZeroScaledAmount()")) && reason.length == 4) {
                 expectedRejectedLiquidationCalls++;
                 return;
             }
