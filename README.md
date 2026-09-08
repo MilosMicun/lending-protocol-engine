@@ -121,9 +121,9 @@ secondOrderTerm = interestFactor² / (2 × WAD)
 currentIndex    = borrowIndex × (WAD + interestFactor + secondOrderTerm) / WAD
 ```
 
-This is neither continuous nor per-block compounding. `borrow()`, `repay()`, and `liquidate()` checkpoint the stored index before mutating debt. Collateral operations, liquidity operations, view calls, and the passage of time do not checkpoint it.
+This is neither continuous nor per-block compounding. `borrow()`, `repay()`, and `liquidate()` checkpoint the stored index before mutating debt. The future V1.1 implementation also checkpoints immediately before a liquidity deposit or withdrawal changes `totalLiquidity`. Collateral operations, view calls, and the passage of time do not checkpoint it.
 
-The elapsed interval uses utilization observed at the later debt checkpoint; historical utilization is not integrated. Because liquidity changes do not checkpoint first, a deposit can lower—and a withdrawal can raise—the rate applied to the entire interval since the prior debt checkpoint. This is a documented V1 limitation.
+The historical V1 implementation deployed on Sepolia does not checkpoint liquidity changes. A deposit can therefore lower—and a withdrawal can raise—the rate that V1 applies to the entire interval since the prior debt checkpoint. V1.1 corrects this discontinuity by persisting the old-utilization interval before changing liquidity, so the new utilization-dependent rate applies only to future elapsed time. No public V1-to-V1.1 upgrade has occurred.
 
 ### Liquidation
 
@@ -199,7 +199,7 @@ V1 is designed for standard, exact-transfer, non-rebasing ERC-20 assets whose ra
 - No public liquidation or public V1-to-V1.1 upgrade has been executed.
 - sdETH and sdUSD are fixed-supply testnet demonstration assets, not production assets.
 - Borrower debt accrues, but lender yield distribution is not implemented; `totalLiquidity` does not grow with accrued interest.
-- Liquidity changes do not checkpoint the borrow index, and later-checkpoint utilization applies to the prior elapsed interval.
+- The historical public V1 does not checkpoint liquidity changes and can retroactively reprice an uncheckpointed interval; the future V1.1 implementation corrects this, but no public upgrade has occurred.
 - Each pool deployment supports one collateral asset.
 - There are no pause controls, liquidation throttles, per-block caps, general reentrancy guard, or governance-controlled economic setters.
 - Safe control reduces unilateral upgrade authority but does not remove signer, key-management, transaction-review, or operational risk.

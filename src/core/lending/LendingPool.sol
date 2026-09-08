@@ -274,11 +274,9 @@ contract LendingPool is Initializable, UUPSUpgradeable {
 
     function depositLiquidity(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
-        // NOTE: depositLiquidity does not checkpoint the stored borrowIndex.
-        // currentBorrowIndex() computes elapsed growth from lastBorrowIndexUpdate using utilization
-        // derived from the current totalLiquidity, so this deposit can lower the rate applied to
-        // the entire uncheckpointed interval. borrow, repay, and liquidate checkpoint the result.
         debtAsset.safeTransferFrom(msg.sender, address(this), amount);
+
+        _updateBorrowIndex();
 
         liquidityBalanceOf[msg.sender] += amount;
         totalLiquidity += amount;
@@ -294,6 +292,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
 
         uint256 available = availableLiquidity();
         if (amount > available) revert InsufficientLiquidity();
+
+        _updateBorrowIndex();
 
         liquidityBalanceOf[msg.sender] -= amount;
         totalLiquidity -= amount;

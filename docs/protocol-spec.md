@@ -205,12 +205,12 @@ updates the index with the second-order approximation
 `borrowIndex * (1e18 + interestFactor + interestFactor² / (2 * 1e18)) / 1e18`. This is neither continuous nor
 per-block compounding.
 
-The stored index is checkpointed before `borrow`, `repay`, and `liquidate`. Liquidity deposits and withdrawals,
-collateral deposits and withdrawals, view calls, and time passage do not checkpoint it. Consequently the next debt
-mutation applies utilization observed at that checkpoint—using then-current total liquidity and stored indexed
-debt—to all time since the prior checkpoint. Historical utilization is not recorded or integrated. An intervening
-large liquidity deposit can therefore undercharge the preceding period, while a large withdrawal can overcharge
-it. Phase 1 deliberately preserves this utilization-checkpointing limitation.
+The stored index is checkpointed before `borrow`, `repay`, and `liquidate`. The future V1.1 implementation also
+checkpoints before liquidity deposits and withdrawals change `totalLiquidity`; collateral operations, view calls,
+and time passage do not checkpoint it. The historical V1 deployed on Sepolia lacks those liquidity checkpoints, so
+an intervening large deposit can undercharge the preceding period and a large withdrawal can overcharge it. V1.1
+persists the old-utilization interval at the liquidity boundary and applies the new utilization only to future
+elapsed time. No public V1-to-V1.1 upgrade has occurred.
 
 ---
 

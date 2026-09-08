@@ -372,4 +372,4 @@ No public V1-to-V1.1 upgrade has occurred. Every upgrade-specific field below re
 - There is no production incident-response process.
 - No production-readiness, completed-final-audit, or formal-verification claim is made.
 - The fingerprint has the scope and mapping limitations described in Section 7 and cannot prove every mapping entry or all possible state.
-- Phase 1 preserves the existing narrow V1 economics, including its documented pre-existing limitations; V1.1 adds no mutable storage, preserves the complete V1 storage layout, and is behaviorally minimal.
+- V1.1 adds no mutable storage and preserves the complete V1 storage layout. It corrects the historical V1 liquidity-checkpoint discontinuity, while the other documented economic limitations remain unchanged. No public V1-to-V1.1 upgrade has occurred.

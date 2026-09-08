@@ -10,7 +10,7 @@ This specification separates four categories:
 
 - **Current behavior** is behavior proven by the current Solidity sources, compiler storage-layout report, and baseline tests.
 - **Locked Phase 1 behavior** records requirements implemented locally, requirements satisfied by the recorded public V1 deployment where applicable, and constraints that continue to govern later deployments and upgrades.
-- **Known pre-existing limitations** are current economic or accounting characteristics that Phase 1 must preserve rather than repair.
+- **Known pre-existing limitations** are historical V1 economic or accounting characteristics. V1.1 repairs only the liquidity-checkpoint limitation identified in Section 14; the remaining limitations are unchanged.
 - **Future work** is governed by the compatibility rules in this document but is not part of Phase 1.
 
 Phase 1 does not claim production readiness or formal verification.
@@ -215,7 +215,7 @@ Before and after every implementation change, the compiler storage-layout output
 
 ## 9. Preserved V1 economic behavior
 
-Phase 1 changes dispatch and initialization without redesigning protocol economics. It locks the proxy architecture, the exact legacy storage layout, ABI compatibility, and the Phase 1 economic scope. It does not require every edge-case behavior from the original pre-candidate base to remain unchanged: the candidate branch includes reviewed security and correctness hardening that does not redesign the locked Phase 1 economics. This hardening rejects zero-share collateral deposits atomically, strengthens oracle timestamp, decimal, and normalization validation, and makes indebted collateral withdrawals evaluate solvency from the conservatively valued shares remaining after the ceiling-rounded `previewWithdraw` share cost. The remaining-share check prevents an approved withdrawal from leaving debt unsupported when the ERC-4626 exchange rate is non-1:1. Those fixes are part of the current required behavior, while the deliberate V1 limitations in Section 14 remain preserved.
+Phase 1 changes dispatch and initialization without redesigning protocol economics. It locks the proxy architecture, the exact legacy storage layout, ABI compatibility, and the Phase 1 economic scope. It does not require every edge-case behavior from the original pre-candidate base to remain unchanged: the candidate branch includes reviewed security and correctness hardening that does not redesign the locked Phase 1 economics. This hardening rejects zero-share collateral deposits atomically, strengthens oracle timestamp, decimal, and normalization validation, and makes indebted collateral withdrawals evaluate solvency from the conservatively valued shares remaining after the ceiling-rounded `previewWithdraw` share cost. The remaining-share check prevents an approved withdrawal from leaving debt unsupported when the ERC-4626 exchange rate is non-1:1. V1.1 additionally corrects the historical liquidity-checkpoint limitation described in Section 14 without new storage or a change to the interest-growth formula.
 
 Subject to those reviewed hardening fixes, public/external business functions, getters, custom errors, and business-event signatures must remain ABI-compatible and retain their current behavior through the proxy.
 
@@ -225,7 +225,7 @@ In particular, Phase 1 preserves:
 - ERC-4626 collateral share accounting and proxy custody of vault shares, including atomic rejection when a collateral deposit returns zero shares;
 - lender balances as nominal `liquidityBalanceOf` amounts and `totalLiquidity` accounting;
 - scaled debt, global borrow-index accrual, and the current second-order interest approximation;
-- the current points at which `_updateBorrowIndex()` is called;
+- the V1 checkpoint points, with V1.1 adding checkpoints immediately before liquidity mutations change `totalLiquidity`;
 - current borrow, repay, and liquidation checks, together with the current hardened withdrawal checks;
 - documented scaled-debt rounding, liquidation ceiling-rounding behavior, and deliberate scaled-debt dust limitations, together with the reviewed remaining-share withdrawal-solvency fix;
 - current hardened oracle answer, round, timestamp, staleness, decimal-bound, and WAD-normalization checks;
@@ -242,7 +242,7 @@ Phase 1 must not add, remove, or alter any of the following:
 - protocol reserves, reserve factors, or treasury accounting;
 - a liquidation close factor;
 - a terminal bad-debt regime, socialization, write-off, or recovery mechanism;
-- borrow-index checkpoint rules or new checkpoint triggers;
+- the interest-growth formula, utilization formula, or a supply-index/lender-yield model beyond the specified V1.1 liquidity checkpoints;
 - borrow, repay, or liquidation rounding;
 - liquidation mathematics or health-factor formulas;
 - economic parameter setters or governance over economic parameters;
@@ -251,9 +251,9 @@ Phase 1 must not add, remove, or alter any of the following:
 - migration of a live deployment or legacy on-chain state;
 - custom proxy implementations or an override that allows an uninitialized `ERC1967Proxy`;
 - production-readiness or formal-verification claims; and
-- remediation of any limitation listed in Section 14.
+- remediation of any other limitation listed in Section 14.
 
-The V1.1 test implementation may add only one minimal, harmless version or sentinel function that proves calls through the proxy use the new implementation. It must not add economic behavior or mutate existing accounting state.
+The V1.1 implementation adds the liquidity-boundary checkpoint correction and may expose one minimal, harmless version or sentinel function that proves calls through the proxy use the new implementation. It adds no mutable storage, reinitializer, or migration behavior.
 
 ## 11. Required proxy deployment properties
 
@@ -301,7 +301,7 @@ If state changes before Safe execution, the stale prepared transaction and its f
 
 ## 12. Required V1-to-V1.1 upgrade test matrix
 
-The Phase 1 suite must include a real proxy deployment and a real call to `upgradeToAndCall` from V1 to a UUPS-compatible V1.1 test implementation. The V1.1 implementation may expose only a harmless version/sentinel getter in addition to the V1 surface.
+The Phase 1 suite must include a real proxy deployment and a real call to `upgradeToAndCall` from V1 to a UUPS-compatible V1.1 implementation. V1.1 preserves the V1 ABI, adds the liquidity-boundary checkpoint behavior, and may expose a harmless version/sentinel getter.
 
 | Area | Required setup before upgrade | Required assertion after upgrade |
 |---|---|---|
@@ -366,9 +366,9 @@ The implementation and test suite must establish these invariants:
 
 ## 14. Known pre-existing limitations
 
-These limitations exist before upgradeability and must be documented and regression-tested where practical, but must not be fixed in Phase 1:
+These limitations originate in historical V1 and must be documented and regression-tested where practical. V1.1 fixes only the first item:
 
-- **Utilization checkpointing:** liquidity deposits intentionally do not checkpoint the borrow index, and liquidity withdrawals also do not call `_updateBorrowIndex()`. A later debt mutation applies utilization based on then-current total liquidity and debt calculated with the stored index to all time elapsed since the prior checkpoint; historical utilization is not recorded. A large intervening deposit may therefore undercharge the preceding period, while a large withdrawal may overcharge it. Phase 1 preserves these checkpoint rules.
+- **Historical V1 utilization checkpointing:** the deployed V1 does not checkpoint the borrow index before liquidity changes. A later debt mutation can therefore apply then-current utilization to time elapsed before the liquidity mutation: a large deposit may undercharge the preceding period, while a large withdrawal may overcharge it. V1.1 persists the old-utilization interval before changing `totalLiquidity`, keeping the index and existing borrower debt continuous at the boundary. This source correction does not alter the deployed V1 bytecode, and no public V1-to-V1.1 upgrade has occurred.
 - **Scaled-debt dust and rounding:** conversions between nominal and scaled debt use integer division. Partial borrow and repayment paths round down; sufficiently small amounts relative to the index can create zero-scaled changes or leave dust. Full repayment explicitly clears a user's entire scaled balance. Phase 1 does not change these rules.
 - **Supported ERC-20 boundary:** Phase 1 records nominal requested amounts and does not reconcile token balance deltas. Both collateral and debt must therefore be exact-transfer, non-rebasing ERC-20 assets with token units, decimals, and oracle quotation compatible with the pool's raw-unit calculations. Successful token calls or matching decimals alone do not establish compatibility. This is a deployment constraint rather than a dynamically enforced property; the canonical requirements and rationale are in [Asset and callback boundary](../README.md#asset-and-callback-boundary).
 - **External-call ordering and callbacks:** the business functions do not follow one universal checks-effects-interactions order. Token, oracle, and ERC-4626 calls occur at path-specific points, including interactions before later pool accounting writes on liquidity and collateral deposits and on collateral withdrawal. The production contracts have no reentrancy guard, and `SafeERC20` does not prevent hooks, callbacks, or reentrancy. The exact path summary is in [Asset and callback boundary](../README.md#asset-and-callback-boundary).
@@ -392,7 +392,7 @@ The local implementation and public V1 deployment satisfy the applicable criteri
 - the authority API, events, errors, two-step transfer, no-renounce rule, and ERC-7201 location match this document;
 - `_authorizeUpgrade` accepts only the active authority;
 - the exact legacy storage prefix in Section 7 remains unchanged;
-- existing ABI, business events, economics, documented rounding, and checkpoint behavior remain compatible, with current errors and the reviewed oracle hardening, zero-share collateral deposit rejection, and remaining-share withdrawal-solvency hardening retained alongside the specified upgradeability additions;
+- existing ABI, business events, economics, and documented rounding remain compatible, with the specified V1.1 liquidity checkpoints, current errors, and the reviewed oracle hardening, zero-share collateral deposit rejection, and remaining-share withdrawal-solvency hardening retained alongside the specified upgradeability additions;
 - baseline unit, fuzz, and invariant tests pass through the intended deployment model;
 - the complete V1-to-V1.1 matrix and all negative upgrade tests in Section 12 pass;
 - storage-layout output is captured before and after the implementation change and reviewed, with representative mapping values tested through the upgrade;

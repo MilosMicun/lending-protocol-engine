@@ -128,6 +128,47 @@ contract LendingPoolUpgradeStatePreservationTest is Test, LendingPoolProxyFixtur
         _provePostUpgradeFlows();
     }
 
+    function test_V1_1CheckpointsInterestAcrossLiquidityMutationsAfterUpgrade() public {
+        _deployAndBuildLiveState();
+        LiveStateSnapshot memory beforeState = _snapshotLiveState();
+
+        vm.prank(activeAuthority);
+        pool.upgradeToAndCall(address(v11Implementation), "");
+
+        _assertImmediateUpgradePreservation(beforeState);
+        assertEq(address(pool), beforeState.proxyAddress);
+        assertEq(vm.load(address(pool), ERC1967_IMPLEMENTATION_SLOT), _addressWord(address(v11Implementation)));
+
+        vm.warp(block.timestamp + 30 days);
+        uint256 indexBeforeDeposit = pool.currentBorrowIndex();
+        uint256 borrowerOneDebtBeforeDeposit = pool.debtBalanceOf(borrowerOne);
+        uint256 borrowerTwoDebtBeforeDeposit = pool.debtBalanceOf(borrowerTwo);
+
+        debtToken.mint(liquidityProviderOne, 1_000 ether);
+        vm.prank(liquidityProviderOne);
+        pool.depositLiquidity(1_000 ether);
+
+        assertEq(pool.borrowIndex(), indexBeforeDeposit);
+        assertEq(pool.currentBorrowIndex(), indexBeforeDeposit);
+        assertEq(pool.debtBalanceOf(borrowerOne), borrowerOneDebtBeforeDeposit);
+        assertEq(pool.debtBalanceOf(borrowerTwo), borrowerTwoDebtBeforeDeposit);
+
+        vm.warp(block.timestamp + 30 days);
+        uint256 indexBeforeWithdrawal = pool.currentBorrowIndex();
+        uint256 borrowerOneDebtBeforeWithdrawal = pool.debtBalanceOf(borrowerOne);
+        uint256 borrowerTwoDebtBeforeWithdrawal = pool.debtBalanceOf(borrowerTwo);
+
+        vm.prank(liquidityProviderOne);
+        pool.withdrawLiquidity(500 ether);
+
+        assertEq(pool.borrowIndex(), indexBeforeWithdrawal);
+        assertEq(pool.currentBorrowIndex(), indexBeforeWithdrawal);
+        assertEq(pool.debtBalanceOf(borrowerOne), borrowerOneDebtBeforeWithdrawal);
+        assertEq(pool.debtBalanceOf(borrowerTwo), borrowerTwoDebtBeforeWithdrawal);
+        assertEq(address(pool), beforeState.proxyAddress);
+        _assertImplementationsCustodyFree();
+    }
+
     function _deployAndBuildLiveState() internal {
         activeAuthority = makeAddr("activeAuthority");
         pendingAuthority = makeAddr("pendingAuthority");
