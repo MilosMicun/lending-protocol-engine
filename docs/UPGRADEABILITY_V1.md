@@ -1,187 +1,59 @@
-# LendingPool UUPS Upgradeability V1
+# LendingPool UUPS Upgradeability and V1.2 Migration
 
-## 1. Purpose and portfolio evolution
+## 1. Status and scope
 
-This document is the authoritative repository-local specification and implementation record for Phase 1 of converting `LendingPool` to a UUPS/ERC-1967 architecture. The repository and its Git history remain the existing lending-protocol portfolio project; upgradeability is a development phase, not a replacement project.
+This document defines the repository's UUPS/ERC-1967 architecture, frozen V1 storage contract, and V1/V1.1-to-V1.2 migration.
 
-Phase 1 began without deployed state requiring migration. The locked legacy storage prefix exists to preserve the current contract's layout and to establish a stable base for later implementation versions, not to support a migration of legacy state. The completed public Sepolia deployment is a fresh educational testnet deployment, not a migration; [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md) records its canonical ERC1967 proxy. No public V1-to-V1.1 upgrade has been executed.
+The public Sepolia system is a completed historical V1 deployment. Its canonical ERC-1967 proxy remains at `0x4Ba81845c2E130013EF2Be36e220cA1166E70873` and still points to V1 implementation `0x4f5c7dC968602b54519F515576FeC936405CB940`. The public representative flow was executed against V1. No public V1.1 or V1.2 upgrade has occurred.
 
-This specification separates four categories:
+V1.2 is implemented, tested, migration-reviewed within this development workflow, and supported by Safe-controlled preparation and read-only verification tooling. It is a local upgrade candidate, not a publicly installed version. Deployment of a candidate implementation and Safe execution remain future explicitly authorized operations. This repository does not claim an audit, formal verification, or production readiness.
 
-- **Current behavior** is behavior proven by the current Solidity sources, compiler storage-layout report, and baseline tests.
-- **Locked Phase 1 behavior** records requirements implemented locally, requirements satisfied by the recorded public V1 deployment where applicable, and constraints that continue to govern later deployments and upgrades.
-- **Known pre-existing limitations** are current economic or accounting characteristics that Phase 1 must preserve rather than repair.
-- **Future work** is governed by the compatibility rules in this document but is not part of Phase 1.
+## 2. Proxy, implementation, and custody roles
 
-Phase 1 does not claim production readiness or formal verification.
+`LendingPool` inherits OpenZeppelin `Initializable` and `UUPSUpgradeable` and executes through an `ERC1967Proxy`. The implementation constructor calls `_disableInitializers()`. A new proxy is initialized atomically from nonempty constructor calldata containing nine dependency/economic inputs and the explicitly chosen initial upgrade authority.
 
-## 2. Current architecture
+In delegated execution, the proxy is `address(this)`. It is the canonical pool, owns all LendingPool state, directly holds debt-asset balances, owns the vault shares, and holds pool-to-vault approvals. The implementation is code only. `CollateralVault` is a separately deployed non-upgradeable ERC-4626 contract and remains the authoritative holder of collateral assets.
 
-The current `LendingPool` implementation inherits `Initializable` and `UUPSUpgradeable` and is used through a real `ERC1967Proxy`. Its constructor takes no configuration and only calls `_disableInitializers()`. The proxy is atomically initialized from nonempty constructor calldata with ten parameters: nine economic/dependency values followed by the explicitly configured `initialUpgradeAuthority_`. The initializer validates those inputs, derives `collateralAsset` from `vault.asset()`, assigns configuration, initializes `borrowIndex` to `1e18`, and initializes `lastBorrowIndexUpdate` to `block.timestamp`.
+The ERC-1967 implementation slot is:
 
-In delegated execution, the proxy is `address(this)` and is the canonical `LendingPool` and custody address. It holds debt-asset token balances directly. When collateral is deposited, the proxy temporarily receives the collateral asset, approves `CollateralVault`, deposits into that vault, and owns the resulting ERC-4626 shares. User claims are represented by the proxy's pool mappings; users do not directly own the corresponding vault shares. Implementations are code targets only and must not receive protocol assets, vault shares, or approvals.
-
-`CollateralVault` is a separately deployed, constructor-configured ERC-4626 contract. It is not upgradeable. The oracle and token contracts also remain external dependencies of `LendingPool`; only `LendingPool` is UUPS upgradeable.
-
-The current repository includes the proxy deployment path, the ten-parameter initializer, a V1.1 test-implementation version getter, and a two-step upgrade-authority mechanism. It has no administrative economic-parameter setters and no live-deployment migration path. Protocol tests exercise `LendingPool` through proxy fixtures and cover initialization validation, collateral and liquidity flows, borrowing, repayment, liquidation, interest accrual, fuzz cases, accounting invariants, and upgrade behavior.
-
-## 3. Current UUPS/ERC1967 architecture
-
-The current canonical repository architecture consists of:
-
-1. a `LendingPool` implementation that uses the vendored OpenZeppelin Contracts 5.6.1 `Initializable` and `UUPSUpgradeable` primitives;
-2. a real vendored OpenZeppelin Contracts 5.6.1 `ERC1967Proxy`; and
-3. the existing, separately deployed, non-upgradeable `CollateralVault`.
-
-All user and integrator calls to the canonical pool must target the proxy. The proxy delegates execution to the implementation while retaining all pool state, token balances, approvals, and vault-share ownership at the proxy address. The implementation address is code only and must not be used as a pool or custody address.
-
-OpenZeppelin 5.6.1 provides the required mechanics:
-
-- `Initializable` stores initialization state in its own ERC-7201 namespace, so inheriting it does not consume a legacy linear storage slot.
-- `UUPSUpgradeable` has no layout-bearing mutable storage; its context guard is an immutable value stored in implementation bytecode. It exposes `upgradeToAndCall(address,bytes)`, requires proxy execution, and checks the new implementation through ERC-1822 `proxiableUUID()`.
-- `ERC1967Proxy` stores its implementation in the ERC-1967 implementation slot and delegates nonempty constructor `_data` to the implementation. In the vendored 5.6.1 version, empty `_data` is rejected by default.
-
-Only `LendingPool` is upgradeable. Constructor-based `Ownable`, or any other inheritance that inserts linear state before the legacy prefix, is forbidden.
-
-This architecture has now been demonstrated through the recorded public Sepolia V1 deployment; see [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). Sepolia remains the locked Phase 1 educational testnet environment, and the deployment does not make the system production-ready.
-
-The deployed canonical proxy's active authority is the recorded official Safe, configured with two distinct development EOA owners and a 2-of-2 threshold. No public V1-to-V1.1 upgrade has been executed. The Safe is external infrastructure: the repository does not implement Safe, a multisig, governance, or a timelock, and this selection does not expand the core protocol scope.
-
-## 4. Initialization specification
-
-The implementation constructor contains no configuration or state initialization other than a call to `_disableInitializers()`. This locks the implementation's own `Initializable` namespace and makes direct calls to `initialize(...)` revert.
-
-The proxy-facing initializer has the same nine constructor-equivalent configuration parameters, with their existing types and order, followed by one infrastructure parameter for the initial upgrade authority:
-
-```solidity
-function initialize(
-    address priceFeed_,
-    address vault_,
-    address debtAsset_,
-    uint256 maxPriceStaleness_,
-    uint256 ltvBps_,
-    uint256 liquidationThresholdBps_,
-    uint256 liquidationBonusBps_,
-    uint256 baseBorrowRate_,
-    uint256 borrowRateSlope_,
-    address initialUpgradeAuthority_
-) external initializer;
+```text
+0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
 ```
 
-`initialize(...)` implements the locked constructor-equivalent checks:
+OpenZeppelin's initialization state uses its ERC-7201 namespace at:
 
-- `priceFeed_`, `vault_`, and `debtAsset_` must be nonzero, otherwise `ZeroAddress()` reverts.
-- `maxPriceStaleness_` must be nonzero, otherwise `InvalidStalenessWindow()` reverts.
-- each risk parameter must be nonzero; LTV must be lower than the liquidation threshold; the liquidation threshold must be at most `10_000`; and the liquidation bonus must be at most `10_000`. Invalid values revert with `InvalidRiskParameters()`.
-- `baseBorrowRate_ + borrowRateSlope_` must be at most `1e18`, otherwise `InvalidInterestRateModel()` reverts. Phase 1 must preserve the current checked-arithmetic behavior of this expression.
-- `initialUpgradeAuthority_` must be nonzero, otherwise `InvalidUpgradeAuthority(initialUpgradeAuthority_)` reverts.
-
-After validation, the initializer performs every locked assignment and initial value:
-
-- `priceFeed = IPriceFeed(priceFeed_)`;
-- `vault = CollateralVault(vault_)`;
-- `collateralAsset = IERC20(vault.asset())`;
-- `debtAsset = IERC20(debtAsset_)`;
-- `maxPriceStaleness = maxPriceStaleness_`;
-- the three risk parameters equal their inputs;
-- `borrowIndex = 1e18`;
-- `lastBorrowIndexUpdate = block.timestamp`;
-- `baseBorrowRate` and `borrowRateSlope` equal their inputs; and
-- all totals and mappings retain their Solidity zero initial values.
-
-The initializer atomically stores `initialUpgradeAuthority_` as the active upgrade authority and initializes the pending-authority field to the zero-value no-pending sentinel. It does not derive either authority value from `msg.sender`. The proxy deployer and configured initial authority are independent addresses and may differ; for example, a deployment account or factory may deploy the proxy while a multisig is explicitly configured as the initial authority.
-
-For the recorded public Sepolia V1 deployment, the deployment account and the Safe were distinct, and the Safe address was passed explicitly as `initialUpgradeAuthority_`. The deployer received no authority from broadcasting the deployment. Any future independent deployment must preserve and independently verify these properties.
-
-The initializer is version 1 and succeeds exactly once in proxy storage. A second proxy call to it reverts with OpenZeppelin's `InvalidInitialization()`. The implementation's constructor-time `_disableInitializers()` affects only implementation storage and does not prevent the constructor delegatecall from initializing proxy storage.
-
-## 5. Upgrade authorization model
-
-The current implementation uses a configurable, two-step upgrade authority with this public API:
-
-```solidity
-function upgradeAuthority() public view returns (address);
-function pendingUpgradeAuthority() public view returns (address);
-function proposeUpgradeAuthority(address newAuthority) external;
-function acceptUpgradeAuthority() external;
+```text
+0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00
 ```
 
-The required new errors and events are:
+V1.2 overrides `_initializableStorageSlot()` with that established location, so migration advances the same proxy initialization record from version 1 to 2.
 
-```solidity
-error UnauthorizedUpgradeAuthority(address caller);
-error InvalidUpgradeAuthority(address authority);
-error NotPendingUpgradeAuthority(address caller);
+## 3. Upgrade authority
 
-event UpgradeAuthorityTransferStarted(
-    address indexed currentAuthority,
-    address indexed pendingAuthority
-);
-event UpgradeAuthorityTransferred(
-    address indexed previousAuthority,
-    address indexed newAuthority
-);
-```
-
-Only the active authority may call `proposeUpgradeAuthority`. The proposed address must be nonzero and must become the pending authority; the proposal emits `UpgradeAuthorityTransferStarted`. A later valid proposal by the active authority may replace the earlier pending address.
-
-Only the currently pending address may call `acceptUpgradeAuthority`. Acceptance makes it the active authority, clears the pending nomination, and emits `UpgradeAuthorityTransferred`. Before acceptance, a pending authority has no upgrade permission. There is no renounce function and no transfer path to the zero address.
-
-The zero value returned by `pendingUpgradeAuthority()` means that no nomination is pending; it is a sentinel, not a pending authority. Accordingly, neither the active authority nor any nominated pending authority may be set to the zero address. Clearing the nomination after acceptance restores the no-pending sentinel and is not a zero-address nomination.
-
-`_authorizeUpgrade(address)` authorizes only when `msg.sender == upgradeAuthority()`. No pending authority, proxy deployer, proxy admin, token holder, vault owner, or other address receives implicit permission. In particular, deploying the proxy confers no upgrade permission unless that address was separately supplied as `initialUpgradeAuthority_` or later accepted a valid two-step transfer. Unauthorized calls revert with `UnauthorizedUpgradeAuthority(msg.sender)`.
-
-For the recorded V1 deployment, the Safe was configured directly as the active authority during atomic proxy initialization. Any future upgrade requires both Safe owners to confirm under its 2-of-2 policy. Foundry may deploy a future implementation and prepare exact calldata, but it must never receive, impersonate, or control the Safe authority and must not consume an authority private key or mnemonic. Safe upgrade execution remains external to the repository tooling, and no public V1-to-V1.1 upgrade has occurred.
-
-## 6. ERC-7201 authority storage specification
-
-Upgrade-authority state must not be declared as ordinary linear state. It must use this custom ERC-7201 namespace and structure:
-
-```solidity
-/// @custom:storage-location erc7201:lending.protocol.storage.LendingPoolUpgradeAuthority
-struct UpgradeAuthorityStorage {
-    address activeAuthority;
-    address pendingAuthority;
-}
-```
-
-The namespace identifier is locked as:
+Upgrade authority is stored outside the linear protocol layout in this ERC-7201 namespace:
 
 ```text
 lending.protocol.storage.LendingPoolUpgradeAuthority
-```
-
-Its storage location is derived using the ERC-7201 formula:
-
-```text
-keccak256(
-    abi.encode(uint256(keccak256("lending.protocol.storage.LendingPoolUpgradeAuthority")) - 1)
-) & ~bytes32(uint256(0xff))
-```
-
-The precomputed location is:
-
-```text
 0x8000ce11f38414f298b74975bfaea500fcdbebb431834e96f66ac2883c9bb800
 ```
 
-The implementation must use a private constant with that value and an internal/private storage accessor that assigns the structure's `.slot` to the constant. The active authority occupies offset 0 of the namespace root. Because a second 20-byte address does not fit in the 12 bytes remaining in that slot, the pending authority occupies offset 0 of the next slot. No authority field may be added to slots 0–17 or as a new ordinary linear field.
+The namespace stores `activeAuthority` followed by `pendingAuthority`. Only the active authority may propose a nonzero pending authority or pass `_authorizeUpgrade`. Only the current pending authority may accept; acceptance replaces the active authority and clears the pending value. There is no renounce function or zero-address transfer path.
 
-This namespace is distinct from OpenZeppelin's `openzeppelin.storage.Initializable` namespace and from the ERC-1967 implementation slot. Tests must verify the formula and ensure that the namespaces and ERC-1967 slot do not collide.
+For the public deployment, the active authority is the recorded 2-of-2 Safe and the pending authority is zero. The deployer has no implicit upgrade permission. Foundry tooling may deploy a candidate and prepare calldata, but it never receives or impersonates Safe authority and does not execute the proxy upgrade.
 
-## 7. Exact legacy storage layout table for slots `0–17`
+## 4. Frozen protocol storage
 
-The following is the actual output model reported by running `forge inspect src/core/lending/LendingPool.sol:LendingPool storage-layout` with the repository's Solidity 0.8.24 configuration before Phase 1 changes. Every entry matches the current compiler report.
+V1, V1.1, and V1.2 have the same compiler-reported mutable protocol layout. V1.2 declares no appended mutable storage.
 
-| Slot | Offset | Bytes | Field | Compiler-reported type |
-|---:|---:|---:|---|---|
+| Slot | Offset | Bytes | Field | Type |
+| ---: | ---: | ---: | --- | --- |
 | 0 | 0 | 32 | `ltvBps` | `uint256` |
 | 1 | 0 | 32 | `liquidationThresholdBps` | `uint256` |
 | 2 | 0 | 32 | `liquidationBonusBps` | `uint256` |
-| 3 | 0 | 20 | `vault` | `contract CollateralVault` |
-| 4 | 0 | 20 | `priceFeed` | `contract IPriceFeed` |
-| 5 | 0 | 20 | `debtAsset` | `contract IERC20` |
-| 6 | 0 | 20 | `collateralAsset` | `contract IERC20` |
+| 3 | 0 | 20 | `vault` | `CollateralVault` |
+| 4 | 0 | 20 | `priceFeed` | `IPriceFeed` |
+| 5 | 0 | 20 | `debtAsset` | `IERC20` |
+| 6 | 0 | 20 | `collateralAsset` | `IERC20` |
 | 7 | 0 | 32 | `maxPriceStaleness` | `uint256` |
 | 8 | 0 | 32 | `borrowIndex` | `uint256` |
 | 9 | 0 | 32 | `lastBorrowIndexUpdate` | `uint256` |
@@ -190,229 +62,93 @@ The following is the actual output model reported by running `forge inspect src/
 | 12 | 0 | 32 | `baseBorrowRate` | `uint256` |
 | 13 | 0 | 32 | `borrowRateSlope` | `uint256` |
 | 14 | 0 | 32 | `totalScaledDebt` | `uint256` |
-| 15 | 0 | 32 | `scaledDebtOf` mapping seed | `mapping(address => uint256)` |
-| 16 | 0 | 32 | `collateralSharesOf` mapping seed | `mapping(address => uint256)` |
-| 17 | 0 | 32 | `liquidityBalanceOf` mapping seed | `mapping(address => uint256)` |
+| 15 | 0 | 32 | `scaledDebtOf` seed | `mapping(address => uint256)` |
+| 16 | 0 | 32 | `collateralSharesOf` seed | `mapping(address => uint256)` |
+| 17 | 0 | 32 | `liquidityBalanceOf` seed | `mapping(address => uint256)` |
 
-Constants do not occupy storage. The legacy prefix ends after the mapping seed at slot 17.
+Slots 0–17 and their mapping key/value types are immutable compatibility commitments. Implementations must not reorder, remove, repurpose, or insert fields within this prefix, introduce inherited linear storage ahead of it, or assume a dependency upgrade is layout-compatible without inspecting its source and compiler layout.
 
-## 8. Storage compatibility rules
+Golden-layout tests compare V1, V1.1, and V1.2 artifacts against all 18 entries and confirm representative nonzero mapping leaves at the frozen seeds. They also preserve historical selectors; V1.2 adds only `migrateToV1_2()` beyond the V1.1 interface.
 
-Slots 0–17 are the immutable V1 legacy prefix. Phase 1 and all future implementations must not:
+## 5. Interest-accounting evolution
 
-- reorder or delete a legacy field;
-- change a legacy field's type, width, or visibility in a way that changes its storage or ABI;
-- insert a field before or between legacy fields;
-- change a mapping's key or value type;
-- introduce inherited linear state before the legacy prefix; or
-- repurpose any legacy slot or mapping seed.
+Historical V1 uses WAD rate and index arithmetic with a second-order approximation. It checkpoints debt-changing operations but its deployed bytecode does not checkpoint liquidity deposits or withdrawals. The current source checkpoint correction persists the pre-mutation interval before every debt or liquidity mutation:
 
-Inheriting the vendored `Initializable` and `UUPSUpgradeable` is permitted because their current 5.6.1 implementations do not add mutable linear storage: initialization data is namespaced and the UUPS context value is immutable. Any future dependency update must be reviewed from source and must not be assumed layout-compatible merely because its import path or contract name is unchanged.
+```text
+settle at old utilization -> store index and timestamp -> mutate -> use new rate prospectively
+```
 
-New administrative state must use a documented ERC-7201 namespace. Future economic state may use a new ERC-7201 namespace or be appended after slot 17 only after an explicit versioned specification and storage-layout review. Namespaces must be unique, formula-derived, documented with `@custom:storage-location`, and collision-tested.
+That correction is inherited by V1.1 and V1.2. Lower utilization slows future index growth; it cannot decrease an accrued index or borrower debt.
 
-Before and after every implementation change, the compiler storage-layout output must be captured and compared. Mapping contents must be checked through representative keys because a table can show a mapping seed without proving stored entries remain readable.
+V1.2 replaces prospective interest growth with once-per-second compounding. The nominal annual rate remains WAD, the stored index remains WAD, and `BorrowIndexMath` uses RAY precision internally for the per-second base and exponentiation. It uses full-width `Math.mulDiv` and explicit rounding: ceil for scaled debt minted by a borrow; floor for displayed debt, utilization, variable rate, and scaled debt burned by a partial repayment or liquidation. A zero scaled change reverts, while full repayment clears all of the account's scaled debt.
 
-## 9. Preserved V1 economic behavior
+Supported V1.2 accounting is bounded to combined annual rates at or below 100%, positive-rate single-call intervals at or below 100 years, an index at least WAD, and a debt quantum `ceil(index / WAD)` at most `1_000_000` (therefore index at most `1e24`). The debt asset must report exactly 18 decimals. These bounds avoid an unsupported numerical regime; they do not assert unlimited numerical support.
 
-Phase 1 changes dispatch and initialization without redesigning protocol economics. It locks the proxy architecture, the exact legacy storage layout, ABI compatibility, and the Phase 1 economic scope. It does not require every edge-case behavior from the original pre-candidate base to remain unchanged: the candidate branch includes reviewed security and correctness hardening that does not redesign the locked Phase 1 economics. This hardening rejects zero-share collateral deposits atomically, strengthens oracle timestamp, decimal, and normalization validation, and makes indebted collateral withdrawals evaluate solvency from the conservatively valued shares remaining after the ceiling-rounded `previewWithdraw` share cost. The remaining-share check prevents an approved withdrawal from leaving debt unsupported when the ERC-4626 exchange rate is non-1:1. Those fixes are part of the current required behavior, while the deliberate V1 limitations in Section 14 remain preserved.
+Existing scaled balances are share-like units. Index growth increases their nominal value without mutating the balances. Equal nominal borrows at higher indexes require fewer scaled units, so smaller scaled numbers do not imply reduced nominal debt.
 
-Subject to those reviewed hardening fixes, public/external business functions, getters, custom errors, and business-event signatures must remain ABI-compatible and retain their current behavior through the proxy.
+## 6. Atomic V1/V1.1-to-V1.2 migration
 
-In particular, Phase 1 preserves:
+The only accepted upgrade payload is the canonical proxy call:
 
-- constructor-equivalent validation and initial configuration;
-- ERC-4626 collateral share accounting and proxy custody of vault shares, including atomic rejection when a collateral deposit returns zero shares;
-- lender balances as nominal `liquidityBalanceOf` amounts and `totalLiquidity` accounting;
-- scaled debt, global borrow-index accrual, and the current second-order interest approximation;
-- the current points at which `_updateBorrowIndex()` is called;
-- current borrow, repay, and liquidation checks, together with the current hardened withdrawal checks;
-- documented scaled-debt rounding, liquidation ceiling-rounding behavior, and deliberate scaled-debt dust limitations, together with the reviewed remaining-share withdrawal-solvency fix;
-- current hardened oracle answer, round, timestamp, staleness, decimal-bound, and WAD-normalization checks;
-- collateral-capped liquidation and visible residual debt; and
-- current token transfer, approval, and vault interaction behavior, with `address(this)` resolving to the proxy.
+```solidity
+upgradeToAndCall(
+    newImplementation,
+    abi.encodeCall(LendingPoolV1_2.migrateToV1_2, ())
+)
+```
 
-The only permitted ABI additions are initializer/UUPS interfaces and the explicitly new upgrade-authority functions, errors, and events defined in this specification. Existing custom error selectors and business event signatures must not change.
+The same active authority is checked by UUPS authorization and by `migrateToV1_2()`. The inner call is `onlyProxy` and `reinitializer(2)`. UUPS also requires the candidate to expose the expected ERC-1822 UUID.
 
-## 10. Explicit out-of-scope list
+During migration, accounting is inactive until the reinitializer finishes. The implementation:
 
-Phase 1 must not add, remove, or alter any of the following:
+1. reads the pre-migration `borrowIndex` and elapsed time;
+2. rejects an index below WAD;
+3. settles the entire open historical interval with the exact legacy V1/V1.1 formula and checked-arithmetic operation order, using the pre-migration liquidity, scaled debt, and rate configuration;
+4. stores the settled index and the current block timestamp;
+5. validates the V1.2 index/quantum, debt-decimal, and interest-rate domains; and
+6. activates initializer version 2 and emits `V1_2Activated`.
 
-- supplier-share accounting or lender yield distribution;
-- protocol reserves, reserve factors, or treasury accounting;
-- a liquidation close factor;
-- a terminal bad-debt regime, socialization, write-off, or recovery mechanism;
-- borrow-index checkpoint rules or new checkpoint triggers;
-- borrow, repay, or liquidation rounding;
-- liquidation mathematics or health-factor formulas;
-- economic parameter setters or governance over economic parameters;
-- changes to oracle or token decimal assumptions;
-- an upgradeable `CollateralVault`;
-- migration of a live deployment or legacy on-chain state;
-- custom proxy implementations or an override that allows an uninitialized `ERC1967Proxy`;
-- production-readiness or formal-verification claims; and
-- remediation of any limitation listed in Section 14.
+This settlement normalizes the transition at one accounting boundary; it does not rewrite per-user or aggregate scaled debt. The V1.2 formula applies only after activation. Configuration, aggregate totals other than the specified index/timestamp transition, mapping values, authority state, custody, proxy address, vault address, and frozen layout are preserved.
 
-The V1.1 test implementation may add only one minimal, harmless version or sentinel function that proves calls through the proxy use the new implementation. It must not add economic behavior or mutate existing accounting state.
+If legacy arithmetic or any V1.2 validation fails, the whole `upgradeToAndCall` reverts, including the ERC-1967 implementation-slot change and initializer-version write. Zero/sub-WAD indexes, unsupported debt decimals, invalid rates, and excessive debt quantum are tested rollback cases.
 
-## 11. Required proxy deployment properties
+A plain implementation replacement with empty calldata is not accepted. It can leave the V1.2 implementation installed at initializer version 1, where accounting-dependent views and mutations fail with `V1_2AccountingInactive`. Tests cover an authorized recovery migration, but operators must not use that recovery case as the planned path.
 
-A canonical deployment must satisfy all of these properties:
+## 7. State-preservation requirements
 
-1. Deploy a locked `LendingPool` implementation whose constructor calls only `_disableInitializers()`.
-2. Deploy the separately configured, non-upgradeable `CollateralVault`.
-3. ABI-encode `initialize(...)` with the nine validated constructor-equivalent values followed by the explicitly selected, nonzero `initialUpgradeAuthority_`.
-4. Pass that nonempty payload as `_data` to the real `ERC1967Proxy` constructor in the same transaction that creates the proxy.
-5. Treat any initialization failure, including a zero initial authority, as an atomic deployment failure; no usable uninitialized proxy may remain.
-6. Use the proxy address as the canonical `LendingPool` address for users, token approvals, monitoring, and all integrations.
-7. Permit the proxy deployer and `initialUpgradeAuthority_` to be different addresses. Deployment creates no implicit authority, and the configured address alone is the initial authority.
-8. Confirm the proxy's ERC-1967 implementation slot points to the intended implementation and its code is nonempty.
-9. Confirm all nine constructor-equivalent configuration results, the derived collateral asset, initial index/timestamp, active authority, and zero pending-authority sentinel through proxy calls.
-10. Confirm direct implementation initialization reverts, deployment causes no implementation custody delta, and any unchanged unsolicited token or vault-share dust is recorded separately from protocol custody.
-11. Publish or record the proxy and implementation addresses distinctly; never present the implementation as the canonical pool.
+Before and after an accepted migration, verification must establish:
 
-The vendored OpenZeppelin 5.6.1 proxy rejects empty constructor `_data` by default. Phase 1 must use that default and must not override `_unsafeAllowUninitialized()`.
+- the same canonical proxy, active and pending authority, dependencies, risk configuration, and rate configuration;
+- the same `totalCollateralShares`, `totalLiquidity`, `totalScaledDebt`, and selected mapping leaves;
+- the exact legacy-settled boundary index and activation timestamp;
+- initializer version 2, V1.2 version reporting, and the candidate address and runtime code hash in the implementation slot;
+- the same proxy debt balance, direct proxy collateral balance, proxy vault shares, vault total assets, vault total supply, and vault collateral balance; and
+- prospective current rate and current index matching an independent V1.2 calculation.
 
-### Sepolia portfolio deployment
+Raw mapping seeds cannot enumerate mapping contents. The operator supplies a canonical strictly sorted account list derived from authenticated deployment and interaction evidence. When that list is declared complete, the preparation and verifier require its scaled debt, collateral shares, and liquidity balances to sum to the aggregate totals. When it is incomplete, continuity is proven only for the supplied leaves; authenticated candidate bytecode and separately reviewed migration logic remain part of the assurance boundary.
 
-The recorded public V1 deployment completed the applicable V1 deployment, authority, representative-flow, and verification requirements below; its canonical evidence is in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). The V1.1 preparation, Safe execution, and post-upgrade verification requirements remain future work because no public V1-to-V1.1 upgrade has occurred. Any independent V1 redeployment must repeat all applicable checks rather than reuse the recorded deployment's evidence. The end-to-end Sepolia exercise requires:
+Implementation balances are not authoritative custody. Construction-time checks ensure candidate deployment itself creates no balance delta at the predicted candidate address. Later permissionless transfers can add token or vault-share dust to either implementation; post-verification reports exact deltas but does not let implementation dust determine the core verdict. Proxy and vault custody are authoritative and any mismatch fails verification.
 
-1. deploy the non-upgradeable `CollateralVault` and any required testnet-only token, oracle, or other dependency;
-2. clearly label every testnet-only dependency, record its purpose and address, and prevent it from being mistaken for a production dependency;
-3. deploy the locked V1 `LendingPool` implementation;
-4. deploy a real `ERC1967Proxy` with nonempty constructor `_data` that atomically invokes the ten-parameter initializer, including the explicitly configured initial authority;
-5. verify the proxy's implementation slot, initialized configuration, active authority, zero pending sentinel, and canonical status before any lending flow;
-6. execute a representative lending flow through the proxy, including liquidity deposit, collateral deposit, borrow, and repayment, while retaining enough nonzero state and custody for meaningful upgrade-preservation checks;
-7. use an official Safe with two distinct development EOA owners and a 2-of-2 threshold as the sole active upgrade authority, while keeping the implementation deployer separate and unauthorized;
-8. use the deploy-and-prepare tooling to deploy a compatible, behaviorally minimal V1.1 implementation that introduces no new mutable storage declarations and preserves the complete V1 storage layout, and produce the exact proxy target, zero value, `upgradeToAndCall` calldata, and pre-upgrade state fingerprint;
-9. independently review the prepared chain, Safe, proxy, current and proposed implementations, authorities, target, value, selector, arguments, UUID, version, and fingerprint before either Safe owner confirms;
-10. obtain both Safe confirmations and execute the reviewed V1-to-V1.1 transaction externally through Safe; Foundry must not execute or impersonate this authority action;
-11. run the independent read-only verifier immediately after execution, without `--broadcast`, and require the expected V1.1 implementation and version, unchanged authorities, and matching cross-run state fingerprint;
-12. record the proxy, V1 implementation, and V1.1 implementation addresses as three distinct roles, and also record the Safe, its owners and threshold, the vault, and testnet-dependency addresses;
-13. record the relevant deployment, initialization, representative-flow, implementation-deployment, prepared transaction, state fingerprint, Safe confirmation/execution, and verification evidence;
-14. perform explorer source verification for the proxy, V1 implementation, V1.1 implementation, vault, and repository-owned testnet dependencies when supported by the available tooling, and record any tooling limitation that prevents verification; and
-15. publish an explicit notice that the Sepolia deployment is educational portfolio infrastructure, uses testnet-only assets or dependencies where identified, and is not production-ready.
+## 8. Safe preparation and verification boundary
 
-The recorded V1 deployment uses the proxy as the canonical pool and custody address. Any future independent redeployment or V1-to-V1.1 upgrade demonstration must continue to use the proxy in that role. Deployment, preparation, and upgrade execution must not transfer protocol assets, approvals, or vault shares to either implementation. Unchanged unsolicited token or vault-share dust may already exist at an implementation address and must be recorded rather than treated as protocol custody. Any implementation custody delta caused during the controlled workflow must fail validation. Recorded V1 addresses and transaction hashes remain canonical in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md); future redeployment or upgrade artifacts require their own evidence.
+`UpgradeLendingPoolV1_2.s.sol` directly constructs the typed V1.2 implementation, authenticates its runtime `extcodehash`, UUID, version, and locked initializer state, snapshots pre-upgrade evidence, and emits the exact proxy target, zero value, and canonical migration calldata. Its broadcast boundary ends after implementation deployment. It does not submit a Safe proposal or execute an upgrade.
 
-Preparation, external Safe execution, and verification must occur in a controlled state-freeze window. The v2 cross-run fingerprint binds the chain, proxy, expected old and new implementations, legacy slots 0–17, active and pending authorities, configuration, aggregate accounting, the direct proxy collateral-asset balance, proxy debt-asset balance, proxy vault-share balance, existing vault custody observations, and old/new implementation custody balances. The ERC-1967 implementation-slot value is intentionally excluded because it must change; the verifier checks that slot independently. Unchanged unsolicited implementation dust and unchanged direct proxy collateral dust are accepted, while changes to fingerprinted protocol state or custody, including any direct proxy collateral delta or legitimate intervening activity, cause a mismatch. Raw mapping seed slots do not enumerate or cryptographically prove every mapping entry, so representative positions remain covered separately by integration tests. This fingerprint is operational evidence, not formal verification.
+The preparation output includes a pre-upgrade state hash, payload fingerprint, tracked-account commitment, and preparation-attestation digest. The operator must preserve the digest independently and supply it to `VerifyLendingPoolV1_2Upgrade.s.sol` after Safe execution. The verifier recomputes it over the preparation identities, evidence commitments, and payload.
 
-If state changes before Safe execution, the stale prepared transaction and its fingerprint must not be used. Preparation must be rerun, and only the newly deployed V1.1 implementation, calldata, and state hash may proceed through a fresh review. A post-execution verification failure must be preserved and investigated; it must not trigger an automatic corrective upgrade. The operational details are defined in `docs/SAFE_UPGRADE_RUNBOOK.md`.
+The digest detects substitution only when the original independently preserved digest remains trusted. It is not a signature, Safe transaction hash, deployment receipt, registry record, or on-chain attestation. A local verifier cannot detect replacement of both the evidence bundle and its externally supplied trust root. Safe owner set, threshold, nonce, EIP-712 transaction hash, signatures, approvals, receipt, and logs remain an external review and evidence responsibility.
 
-## 12. Required V1-to-V1.1 upgrade test matrix
+Preparation evidence is not an on-chain transaction guard. A fresh preflight and controlled state window are required immediately before future Safe execution. See [SAFE_UPGRADE_RUNBOOK.md](SAFE_UPGRADE_RUNBOOK.md).
 
-The Phase 1 suite must include a real proxy deployment and a real call to `upgradeToAndCall` from V1 to a UUPS-compatible V1.1 test implementation. The V1.1 implementation may expose only a harmless version/sentinel getter in addition to the V1 surface.
+## 9. Failure and rollback rules
 
-| Area | Required setup before upgrade | Required assertion after upgrade |
-|---|---|---|
-| Implementation switch | Deploy V1 behind a real `ERC1967Proxy`; deploy V1.1 | ERC-1967 implementation slot is V1.1 and the V1.1 sentinel succeeds through the proxy |
-| Configuration | Initialize the first nine inputs and derived `collateralAsset` | Every economic/configuration getter is bit-for-bit unchanged |
-| Explicit initial authority | Deploy the proxy from address A while passing distinct address B as `initialUpgradeAuthority_` | Active authority is B, pending authority is zero, B can upgrade, and A has no implicit upgrade permission |
-| Invalid initial authority | Attempt proxy construction with `initialUpgradeAuthority_ == address(0)` | Constructor initialization reverts atomically with `InvalidUpgradeAuthority(address(0))`; no usable proxy is deployed |
-| Authority | Establish active authority and a nonzero pending nomination | Active and pending authority state is unchanged; pending still cannot upgrade before acceptance |
-| Index state | Create debt, advance time, and checkpoint | `borrowIndex` and `lastBorrowIndexUpdate` are exactly unchanged by the upgrade |
-| Individual debt | Create scaled debt for at least two borrower addresses | Every tested `scaledDebtOf` entry is exactly unchanged |
-| Total debt | Create nonzero aggregate scaled debt | `totalScaledDebt` is exactly unchanged |
-| Individual collateral | Deposit collateral for at least two addresses | Every tested `collateralSharesOf` entry is exactly unchanged |
-| Total collateral | Create nonzero aggregate collateral shares | `totalCollateralShares` is exactly unchanged |
-| Individual liquidity | Deposit liquidity for at least two addresses | Every tested `liquidityBalanceOf` entry is exactly unchanged |
-| Total liquidity | Create nonzero aggregate liquidity | `totalLiquidity` is exactly unchanged |
-| Debt-asset custody | Leave debt-asset tokens at the proxy and record implementation balances | Exact proxy token balance and recorded implementation balance are unchanged; the workflow creates no implementation custody delta |
-| Collateral custody | Leave any transient/direct collateral balance relevant to the fixture at the proxy and record implementation balances | Exact proxy balance and recorded implementation balance are unchanged; the workflow creates no implementation custody delta |
-| Vault ownership | Make the proxy own nonzero ERC-4626 shares and record implementation share balances | Exact proxy vault-share balance and recorded implementation share balance are unchanged; the workflow creates no implementation custody delta |
-| Approvals | Establish the pool-to-vault collateral approval through normal deposit behavior | Proxy approval remains unchanged; the workflow transfers no protocol approval to an implementation |
-| Business behavior | Record representative views and complete a normal post-upgrade operation | Existing views and state transitions retain V1 behavior |
+- Any preparation mismatch fails before a canonical payload is accepted.
+- Any state change between snapshot and execution invalidates the stale evidence; discard the proposal, rerun preparation, and restart review.
+- Any migration failure reverts the implementation replacement and migration writes atomically.
+- Any post-verification mismatch means the upgrade must not be reported as verified.
+- Do not automatically execute a corrective upgrade. Preserve evidence, diagnose the mismatch, and treat any response as a separately reviewed Safe operation.
 
-The preservation assertions must compare snapshots immediately before and immediately after the upgrade, before any optional post-upgrade call that intentionally changes state. The upgrade itself must use empty call data unless V1.1 has an explicitly specified reinitializer; the minimal V1.1 sentinel needs no reinitializer.
+## 10. Future upgrade rules
 
-Additional negative tests are mandatory:
+Every future implementation must retain slots 0–17 and all established namespaces, provide a version-specific storage and migration review, authenticate code and UUPS compatibility, and use explicitly reviewed `upgradeToAndCall` data. Reinitializers require a unique increasing version and must be executed atomically when their state transition is required.
 
-- an unrelated address cannot call `upgradeToAndCall`;
-- when the proxy deployer differs from the explicitly configured initial authority, only the configured initial authority can upgrade;
-- the proxy deployer has no implicit upgrade permission;
-- a zero initial authority makes proxy deployment fail atomically with `InvalidUpgradeAuthority(address(0))`;
-- a pending authority cannot upgrade before acceptance;
-- the former authority cannot upgrade after an accepted transfer;
-- a zero-address authority proposal reverts;
-- a non-pending address cannot accept;
-- a second `initialize(...)` call through the proxy reverts;
-- `initialize(...)` on the implementation reverts;
-- direct implementation calls to `upgradeToAndCall` fail the UUPS proxy-context check;
-- upgrading to an address without code reverts;
-- upgrading to a contract without `proxiableUUID()` reverts; and
-- upgrading to a contract returning an invalid ERC-1822 UUID reverts.
-
-## 13. Required invariants
-
-The implementation and test suite must establish these invariants:
-
-1. The implementation contract cannot be initialized at any version after construction.
-2. Each proxy can be initialized exactly once at version 1.
-3. The proxy is never left publicly accessible in an uninitialized state; initialization is atomic constructor data.
-4. The initialized active authority equals the explicit `initialUpgradeAuthority_` value and is never derived from the proxy deployer or `msg.sender`.
-5. The proxy deployer has no implicit upgrade permission when it differs from the configured active authority.
-6. Only the active upgrade authority can authorize an upgrade.
-7. A nominated pending authority has no upgrade permission before acceptance.
-8. The active authority can never be the zero address, and no pending nomination can designate the zero address. A zero pending-storage value means no nomination, not a zero-address authority.
-9. Renouncing upgrade authority is impossible because no renounce operation or zero-address transfer exists.
-10. V1 legacy slots 0–17, including mapping seeds and values, remain identical across upgrades.
-11. An upgrade alone does not change existing configuration or accounting state.
-12. Deployment and upgrade execution do not move user tokens or vault shares to an implementation; unchanged unsolicited dust is recorded separately and no implementation custody delta is accepted.
-13. The proxy remains the owner of its token balances, token approvals, and vault shares across upgrades.
-14. Unauthorized upgrades revert without changing the implementation slot or any accounting state.
-15. Upgrades to non-UUPS implementations or implementations reporting an invalid ERC-1822 UUID revert without changing the implementation slot or accounting state.
-16. Authority proposal and acceptance change only the authority namespace and emit the specified authority event; they do not change legacy slots.
-17. Existing accounting invariants continue to hold when all pool calls are made through the proxy.
-
-## 14. Known pre-existing limitations
-
-These limitations exist before upgradeability and must be documented and regression-tested where practical, but must not be fixed in Phase 1:
-
-- **Utilization checkpointing:** liquidity deposits intentionally do not checkpoint the borrow index, and liquidity withdrawals also do not call `_updateBorrowIndex()`. A later debt mutation applies utilization based on then-current total liquidity and debt calculated with the stored index to all time elapsed since the prior checkpoint; historical utilization is not recorded. A large intervening deposit may therefore undercharge the preceding period, while a large withdrawal may overcharge it. Phase 1 preserves these checkpoint rules.
-- **Scaled-debt dust and rounding:** conversions between nominal and scaled debt use integer division. Partial borrow and repayment paths round down; sufficiently small amounts relative to the index can create zero-scaled changes or leave dust. Full repayment explicitly clears a user's entire scaled balance. Phase 1 does not change these rules.
-- **Supported ERC-20 boundary:** Phase 1 records nominal requested amounts and does not reconcile token balance deltas. Both collateral and debt must therefore be exact-transfer, non-rebasing ERC-20 assets with token units, decimals, and oracle quotation compatible with the pool's raw-unit calculations. Successful token calls or matching decimals alone do not establish compatibility. This is a deployment constraint rather than a dynamically enforced property; the canonical requirements and rationale are in [Asset and callback boundary](../README.md#asset-and-callback-boundary).
-- **External-call ordering and callbacks:** the business functions do not follow one universal checks-effects-interactions order. Token, oracle, and ERC-4626 calls occur at path-specific points, including interactions before later pool accounting writes on liquidity and collateral deposits and on collateral withdrawal. The production contracts have no reentrancy guard, and `SafeERC20` does not prevent hooks, callbacks, or reentrancy. The exact path summary is in [Asset and callback boundary](../README.md#asset-and-callback-boundary).
-- **Liquidation health-factor behavior:** liquidation is allowed whenever the pre-liquidation health factor is below `1e18`, but the implementation does not require a partial liquidation to improve the post-liquidation health factor. With the current threshold, bonus, rounding, and caller-selected amount, a partial liquidation can fail to improve or can worsen that ratio. Phase 1 does not add a close factor or change this mathematics.
-- **Residual bad debt:** collateral-capped liquidation can exhaust collateral while leaving scaled debt. The debt remains visible, but there is no terminal bad-debt resolution, reserve, or socialization regime.
-
-The current `docs/protocol-spec.md` remains a simplified conceptual document outside its code-derived interest and invariant-suite sections. Its actor model now distinguishes one-time economic configuration from upgrade authority. The contract fixes economic parameters at initialization and has no economic setters; future parameter governance remains out of scope.
-
-## 15. Acceptance criteria for complete Phase 1
-
-The local implementation and public V1 deployment satisfy the applicable criteria below. Criteria requiring a public V1-to-V1.1 upgrade remain future work because that upgrade has not occurred. Complete end-to-end Phase 1 evidence requires all of the following:
-
-- the canonical pool is a new `LendingPool` implementation behind a real vendored OpenZeppelin 5.6.1 `ERC1967Proxy`;
-- only `LendingPool` is upgradeable and `CollateralVault` remains non-upgradeable;
-- the implementation constructor only disables initializers;
-- the proxy initializes atomically with the ten-parameter initializer and initialization succeeds exactly once;
-- all current constructor validation, assignment, and initial-value behavior is preserved;
-- the first nine initializer parameters retain their existing types, order, validation, assignments, and economic meaning;
-- the tenth initializer parameter explicitly configures a nonzero initial authority, the pending authority starts at the zero no-pending sentinel, and neither value is derived from `msg.sender`;
-- tests prove that deployer and initial authority may differ, only the configured authority may upgrade, the deployer has no implicit permission, and a zero initial authority makes deployment fail atomically;
-- the authority API, events, errors, two-step transfer, no-renounce rule, and ERC-7201 location match this document;
-- `_authorizeUpgrade` accepts only the active authority;
-- the exact legacy storage prefix in Section 7 remains unchanged;
-- existing ABI, business events, economics, documented rounding, and checkpoint behavior remain compatible, with current errors and the reviewed oracle hardening, zero-share collateral deposit rejection, and remaining-share withdrawal-solvency hardening retained alongside the specified upgradeability additions;
-- baseline unit, fuzz, and invariant tests pass through the intended deployment model;
-- the complete V1-to-V1.1 matrix and all negative upgrade tests in Section 12 pass;
-- storage-layout output is captured before and after the implementation change and reviewed, with representative mapping values tested through the upgrade;
-- deployment, preparation, and upgrade execution cause no implementation custody or approval transfer, unchanged unsolicited implementation dust is recorded separately, and the proxy retains canonical custody and approvals;
-- deployment documentation identifies the proxy as canonical and prevents an uninitialized deployment;
-- local tests and adversarial review pass before any public testnet deployment;
-- the concluding public Sepolia portfolio deployment includes the non-upgradeable vault, V1 implementation, atomically initialized real proxy, clearly identified testnet-only dependencies where required, and compatible V1.1 implementation;
-- the official Safe is configured as the sole initial upgrade authority with two distinct development EOA owners and a 2-of-2 threshold, while the deployer remains a separate non-authority;
-- a representative lending flow and a real Safe-authorized V1-to-V1.1 upgrade execute on Sepolia through the proxy using deploy-and-prepare tooling, external Safe execution, and immediate read-only verification in a controlled state-freeze window;
-- Foundry consumes no Safe-authority key or mnemonic and never broadcasts the authority action;
-- distinct Safe, proxy, V1 implementation, and V1.1 implementation addresses, relevant dependency addresses, prepared calldata and fingerprint, and deployment/flow/Safe-execution transaction hashes are recorded;
-- explorer source verification is completed where supported by available tooling, with any tooling limitation recorded; and
-- no document or claim describes Phase 1 as production-ready or formally verified.
-
-## 16. Future upgrade rules
-
-Every future implementation version must begin from this specification and provide a version-specific design, storage diff, threat review, and upgrade test. It must retain the exact slots 0–17 prefix and every previously committed namespace. A field inside a namespace must not be reordered, deleted, or type-changed; additions require the same append-only discipline within that namespace.
-
-Before authorization, reviewers must verify the new implementation has code, implements UUPS/ERC-1822 with the correct ERC-1967 implementation-slot UUID, preserves the proxy-context protections, and cannot initialize itself. Upgrade transactions must be prepared for the explicitly configured active authority, which need not be the original proxy deployer, and must use `upgradeToAndCall` with explicitly reviewed data. For the future public Sepolia V1-to-V1.1 upgrade, this means deploy-and-prepare by a separate implementation deployer, 2-of-2 execution by the external Safe, and independent read-only verification; it does not make Safe part of the core protocol implementation.
-
-New reinitializers are allowed only when a future version needs new state initialization. Each must use a unique monotonically increasing version, be callable only through the proxy under explicitly documented authorization, initialize only newly introduced state, and be executed atomically with the upgrade when required. A version must never reuse an initializer or reset initialization state.
-
-Future economic features—including parameter governance, supplier shares, reserves, close factors, decimal adapters, or bad-debt handling—require their own scoped specification and tests. They must not be smuggled into an infrastructure upgrade. Dependency upgrades likewise require source review of initialization, UUPS, proxy, and storage behavior rather than relying on semantic-version assumptions.
+New economic features—such as lender yield, reserves, close factors, decimal adapters, parameter governance, or bad-debt resolution—require separate specifications and tests. They are not implied by V1.2.
