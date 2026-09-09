@@ -2,9 +2,11 @@
 
 ## 1. Purpose and scope
 
-This document records the public Ethereum Sepolia deployment of the repository's V1 lending system. It is intended as reproducible engineering evidence: it identifies the deployed contracts, authority model, deployment transactions, representative protocol interactions, and public read-only checks.
+This document records the public Ethereum Sepolia deployment of the repository's historical V1 lending system. It is intended as reproducible engineering evidence: it identifies the deployed contracts, authority model, deployment transactions, representative protocol interactions, and public read-only checks.
 
 The deployment was validated through a representative on-chain protocol flow. This document does not claim comprehensive on-chain path coverage, an audit, or production readiness.
+
+The ERC-1967 proxy listed below is the canonical pool, protocol-state, and custody address. It still points to the historical V1 implementation listed below, and the recorded representative flow belongs to V1. No public V1.1 or V1.2 upgrade has occurred. V1.2 exists only as an implemented, tested, migration-reviewed local candidate with Safe preparation and verification tooling; deploying it and executing its atomic migration remain future explicitly authorized operations.
 
 ## 2. Public deployment summary
 
@@ -13,6 +15,7 @@ The deployment was validated through a representative on-chain protocol flow. Th
 | Network | Ethereum Sepolia |
 | Chain ID | `11155111` |
 | Canonical LendingPool | [`0x4Ba81845c2E130013EF2Be36e220cA1166E70873`](https://sepolia.etherscan.io/address/0x4Ba81845c2E130013EF2Be36e220cA1166E70873) (ERC1967 proxy) |
+| Active implementation | Historical V1 at [`0x4f5c7dC968602b54519F515576FeC936405CB940`](https://sepolia.etherscan.io/address/0x4f5c7dC968602b54519F515576FeC936405CB940) |
 | Deployer and demo actor | [`0x9f33C581581BC878f638541DB2b75e117A36BEfD`](https://sepolia.etherscan.io/address/0x9f33C581581BC878f638541DB2b75e117A36BEfD) |
 | Upgrade authority | [`0xe6E0B9B815666bE6B3dbbf441f678C9618196760`](https://sepolia.etherscan.io/address/0xe6E0B9B815666bE6B3dbbf441f678C9618196760) (Safe 1.4.1, 2-of-2) |
 | Pending upgrade authority | `0x0000000000000000000000000000000000000000` |
@@ -29,7 +32,7 @@ Users and integrations interact with the LendingPool at proxy address `0x4Ba8184
 
 The separately deployed `CollateralVault` is an ERC-4626 vault and is not upgradeable. It holds sdETH while the proxy owns the corresponding vault shares and records each user's collateral-share claim. The pool uses the external Chainlink Sepolia ETH / USD feed to value the ETH-like demo collateral in USD-like debt-asset units.
 
-The LendingPool is UUPS-upgradeable. Its active upgrade authority remains the Safe at `0xe6E0B9B815666bE6B3dbbf441f678C9618196760`; its pending upgrade authority is the zero address. Under the reviewed Safe configuration, an upgrade requires both owners to approve a Safe transaction. This separates deployment and demo activity from upgrade authorization.
+The LendingPool is UUPS-upgradeable. Its active upgrade authority remains the Safe at `0xe6E0B9B815666bE6B3dbbf441f678C9618196760`; its pending upgrade authority is the zero address. Under the recorded Safe configuration, an upgrade requires both owners to approve a Safe transaction. This separates deployment and demo activity from upgrade authorization. No such public upgrade transaction is recorded: the proxy remains on V1.
 
 ## 4. Contract addresses
 
@@ -65,7 +68,7 @@ The deployer/demo actor executed the following sequence against the canonical pr
 | 6 | Approve 250 sdUSD for repayment | [`0x68da378d062b92e6c06e54e4be13d537c74e4de546d3419b56fc111db11ea4b8`](https://sepolia.etherscan.io/tx/0x68da378d062b92e6c06e54e4be13d537c74e4de546d3419b56fc111db11ea4b8) |
 | 7 | Repay 250 sdUSD | [`0x9c34148049b6b0d6f594f80c4a67df581d8760f04e44ccc7042d7e300ea96042`](https://sepolia.etherscan.io/tx/0x9c34148049b6b0d6f594f80c4a67df581d8760f04e44ccc7042d7e300ea96042) |
 
-This sequence demonstrates token approvals, liquidity accounting, ERC-4626 collateral custody and share accounting, oracle-constrained borrowing, indexed debt creation, and partial repayment.
+This historical V1 sequence demonstrates token approvals, liquidity accounting, ERC-4626 collateral custody and share accounting, oracle-constrained borrowing, indexed debt creation, and partial repayment. It is not evidence that V1.1 or V1.2 was installed.
 
 ## 7. Post-flow public state
 
@@ -136,6 +139,9 @@ The first command should return chain ID `11155111`. The ERC-1967 storage word s
 - sdETH and sdUSD are fixed-supply demonstration assets, not production assets.
 - The ETH/USD feed semantics apply to the ETH-like demo collateral; they do not establish a general oracle model for arbitrary collateral.
 - No public V1-to-V1.1 upgrade has been executed.
+- No public V1/V1.1-to-V1.2 implementation deployment or proxy upgrade has been executed; V1.2 remains a local candidate.
+- V1.2 improves checkpoint consistency, compounding precision, explicit rounding, and numerical-domain enforcement without invalidating this recorded V1 deployment or flow as historical evidence.
+- The recorded Safe has a 2-of-2 threshold and two distinct owner EOAs, but both EOAs are controlled by the same repository author/operator. Two owner-account approvals are technically required, demonstrating Safe transaction mechanics, threshold enforcement, and key/account separation; this setup does not provide independent-person, independent-organization, or production-governance separation.
 - Safe ownership does not eliminate signer compromise, key-management, transaction-review, or operational risk.
 - This evidence is not an audit or a production-readiness claim.
 - No liquidation is claimed to have been publicly executed.

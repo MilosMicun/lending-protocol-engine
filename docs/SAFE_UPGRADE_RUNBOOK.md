@@ -1,375 +1,242 @@
-# Safe-controlled Sepolia upgrade runbook
+# Safe-controlled V1.2 Upgrade Runbook
 
-## 1. Purpose and scope
+## 1. Current status and purpose
 
-This runbook defines the future public Sepolia portfolio demonstration of a state-preserving UUPS upgrade from `LendingPool` V1 to V1.1. An official Safe configured with a 2-of-2 threshold is the sole upgrade authority for the `LendingPool` proxy. Repository tooling deploys and validates the contracts, prepares the exact upgrade transaction, and independently verifies the result; the Safe owners review, confirm, and execute the upgrade outside Foundry.
+This runbook documents the tooling and review sequence for a possible future V1/V1.1-to-V1.2 UUPS upgrade. It does not authorize one.
 
-This is an educational testnet and portfolio demonstration. It is not production governance guidance, an incident-response procedure, or evidence of production readiness or formal verification. The repository does not implement Safe, a multisig, governance, or a timelock.
+The canonical Sepolia proxy is live and still delegates to the historical V1 implementation. Its recorded flow is V1 evidence. No public V1.1 or V1.2 upgrade has occurred. V1.2 implementation, atomic migration, preparation tooling, verifier, and tests are completed locally; public candidate deployment and Safe execution remain future explicitly authorized operations.
 
-## 2. Roles and trust boundaries
+This is testnet operational guidance, not production governance or incident-response guidance. It makes no audit, formal-verification, or production-readiness claim.
 
-- **Implementation deployer:** a development EOA that broadcasts the V1.1 implementation deployment. It may also deploy the initial V1 system, but it has no upgrade authority.
-- **Safe owner A:** the first development EOA configured as an owner of the official Safe.
-- **Safe owner B:** a distinct second development EOA configured as an owner of the official Safe.
-- **Safe 2-of-2:** the official Safe whose address is supplied as `INITIAL_UPGRADE_AUTHORITY`. It is the only active `LendingPool` upgrade authority, and both owners must confirm an upgrade transaction.
-- **LendingPool proxy:** the canonical pool and custody address. Safe calls this address to execute `upgradeToAndCall(address,bytes)`.
-- **Current V1 implementation:** the implementation referenced by the proxy before the upgrade.
-- **Prepared V1.1 implementation:** the separately deployed, UUPS-compatible target that adds no mutable storage, preserves the complete V1 storage layout, and is validated by the preparation script.
-- **Read-only verifier:** `VerifyLendingPoolV1_1Upgrade.s.sol`, run independently after Safe execution without `--broadcast`.
+## 2. Roles and authority boundary
 
-The implementation deployer and Safe must be distinct. Deployment does not confer upgrade authority. Foundry never receives, controls, or impersonates the Safe authority: it prepares calldata for external Safe execution but does not execute the upgrade. No Safe-owner private key, broadcaster private key, or mnemonic belongs in the repository or in Solidity environment variables. Broadcasters must use external Foundry account configuration, and Safe owners must confirm through the official Safe interface or independently approved Safe tooling.
+- **Implementation deployer:** broadcasts only direct typed construction of a new `LendingPoolV1_2`. It is not the pool upgrade authority.
+- **Safe owner accounts:** two distinct EOAs that must each approve the external Safe transaction under the recorded 2-of-2 threshold.
+- **Safe:** the contract configured as the pool's active upgrade authority. It alone calls the canonical proxy.
+- **Canonical proxy:** permanent pool, state, direct debt custody, and vault-share owner; it is the Safe transaction target.
+- **V1.2 candidate:** authenticated implementation code target, never a pool or custody address.
+- **Preparation script:** `script/UpgradeLendingPoolV1_2.s.sol`; deploys the candidate, snapshots evidence, and constructs canonical calldata.
+- **Verifier:** `script/VerifyLendingPoolV1_2Upgrade.s.sol`; performs read-only state and accounting verification after execution.
 
-## 3. Architecture and sequence
+Foundry does not receive, control, or impersonate the Safe. The scripts do not authenticate the Safe owner set, threshold, nonce, EIP-712 `safeTxHash`, confirmations, signatures, execution receipt, or logs. Those are external Safe-review and evidence responsibilities. Never place a private key or mnemonic in the repository or in a Solidity environment variable.
 
-The recorded public V1 deployment and representative flow completed steps 1-4, with canonical evidence maintained in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). The future public V1-to-V1.1 upgrade begins at step 5. For a separately reviewed independent V1 redeployment, repeat the complete sequence rather than reusing the recorded evidence:
+The recorded demonstration Safe's two owner EOAs are both controlled by the same repository author/operator. Requiring both distinct accounts to approve demonstrates Safe transaction mechanics, threshold enforcement, externalized upgrade authority, and key/account separation; it does not demonstrate independent human signers, organizationally independent governance, or production-governance separation. In a real deployment, governance should instead use independently controlled signers with appropriate operational security, transaction-review, continuity, and recovery procedures.
 
-1. Create an official Safe on Sepolia, configure Safe owner A and Safe owner B, and confirm the threshold is 2-of-2.
-2. Deploy the V1 vault and implementation, then deploy the proxy with atomic initialization, passing the Safe address as `INITIAL_UPGRADE_AUTHORITY`.
-3. Confirm that the deployment broadcaster and the Safe address are distinct and that only the Safe is the active authority.
-4. Optionally execute a controlled representative V1 protocol flow through the proxy, retaining any state intended for preservation evidence.
-5. Run the V1.1 deploy-and-prepare script. It may broadcast only the V1.1 implementation deployment; it must not execute the proxy upgrade.
-6. Preserve the reported pre-upgrade state hash with the prepared target, value, calldata, and implementation address.
-7. Independently review the target, zero value, calldata, `CALL` operation (`0`), exact Safe nonce, chain, proxy, old and new implementations, active authority, and pending-authority sentinel.
-8. Submit the exact reviewed transaction to the Safe and record its exact cryptographic Safe transaction hash (`safeTxHash`) separately from any later Ethereum transaction hash.
-9. Obtain and record confirmations from both Safe owners for that exact `safeTxHash`, operation, and nonce.
-10. Execute the confirmed transaction through the Safe and separately record the executed Ethereum transaction hash.
-11. Run the independent read-only verifier immediately after execution.
-12. Record the public evidence listed in Section 9.
+## 3. Required atomic payload
 
-```text
-Deployer/Foundry        V1.1 impl.          LendingPool proxy      Safe 2-of-2          Verifier
-       |                    |                       |                    |                  |
-       |-- deploy V1 + atomically initialized proxy>|                    |                  |
-       |-- deploy V1.1 -->|                       |                    |                  |
-       |-- prep read/check ->|                       |                    |                  |
-       |-- prep read/check ------------------------->|                    |                  |
-       |   produce target/value/calldata/state hash |                    |                  |
-       |                    |                       |                    | owners confirm   |
-       |                    |                       |<-- call ------------|                  |
-       |                    |<-- impl ref = V1.1 ----|                    |                  |
-       |                    |<--------------------------------------- read impl/custody --|
-       |                    |                       |<------------ read proxy/custody ----|
-```
+The canonical Safe transaction is:
 
-`impl ref = V1.1` is the proxy's ERC-1967 implementation-reference update. The arrows are role boundaries, not a claim that Foundry submits to Safe. Transfer the prepared transaction into the official Safe workflow only after independent review.
+| Field | Required value |
+| --- | --- |
+| `to` | Canonical `LendingPool` proxy |
+| `value` | `0` |
+| `data` | Canonical ABI encoding of `upgradeToAndCall(newV1_2, abi.encodeCall(migrateToV1_2, ()))` |
+| Safe operation | `CALL` (`0`), never `DELEGATECALL` |
 
-## 4. Environment variables
+The outer selector is `upgradeToAndCall(address,bytes)` (`0x4f1ef286`) and the inner calldata is exactly the four-byte `migrateToV1_2()` selector with canonical ABI padding. The preparation script rejects a different target, nonzero value, wrong implementation, wrong selector, empty inner data, trailing data, noncanonical offset, length, or padding.
 
-These are the exact Solidity environment variables read by the scripts. Addresses and configuration values are public inputs; none is a private key, mnemonic, password, or Safe-owner credential. RPC and external account selection are command-line concerns, not Solidity environment variables.
+A plain implementation replacement without the migration calldata is not an accepted path. V1.2 accounting remains inactive until initializer version 2 is reached. The atomic call ensures that a failed migration also rolls back the implementation-slot update.
 
-### V1 deployment: `DeployLendingPoolV1.s.sol`
+## 4. Preparation inputs
+
+The preparation script reads:
 
 | Variable | Meaning |
-|---|---|
-| `COLLATERAL_ASSET` | Address of the selected Sepolia collateral ERC-20. |
-| `DEBT_ASSET` | Address of the selected Sepolia debt ERC-20. |
-| `PRICE_FEED` | Address of the selected Sepolia price-feed dependency. |
-| `COLLATERAL_VAULT_NAME` | Name for the newly deployed non-upgradeable vault. |
-| `COLLATERAL_VAULT_SYMBOL` | Symbol for the newly deployed non-upgradeable vault. |
-| `MAX_PRICE_STALENESS` | Maximum accepted oracle staleness in seconds. |
-| `LTV_BPS` | Loan-to-value setting in basis points. |
-| `LIQUIDATION_THRESHOLD_BPS` | Liquidation threshold in basis points. |
-| `LIQUIDATION_BONUS_BPS` | Liquidation bonus in basis points. |
-| `BASE_BORROW_RATE` | Base borrow-rate input in WAD units. |
-| `BORROW_RATE_SLOPE` | Borrow-rate slope input in WAD units. |
-| `INITIAL_UPGRADE_AUTHORITY` | Official Sepolia Safe address; this must not be the deployer address. |
-| `EXPECTED_CHAIN_ID` | Expected Sepolia chain ID, `11155111`. |
+| --- | --- |
+| `EXPECTED_CHAIN_ID` | Expected chain ID; `11155111` for Sepolia |
+| `LENDING_POOL_PROXY` | Canonical proxy and prepared transaction target |
+| `EXPECTED_CURRENT_IMPLEMENTATION` | V1 or V1.1 implementation currently in the ERC-1967 slot |
+| `EXPECTED_UPGRADE_AUTHORITY` | Contract expected to be the active authority; the recorded public system uses its Safe |
+| `EXPECTED_PENDING_UPGRADE_AUTHORITY` | Expected pending authority, normally the zero sentinel |
+| `TRACKED_ACCOUNT_SET_IS_COMPLETE` | Whether the supplied accounts are claimed to cover all three mappings |
+| `TRACKED_ACCOUNTS` | Comma-separated, nonzero addresses in strictly increasing numeric order |
 
-### V1.1 deployment and preparation: `UpgradeLendingPoolV1_1.s.sol`
+The account list must be derived from authenticated deployment and interaction evidence. Mapping storage is not enumerable. If completeness is true, tracked `scaledDebtOf`, `collateralSharesOf`, and `liquidityBalanceOf` sums must equal all corresponding aggregate totals. If false, the evidence covers only the supplied leaves.
 
-| Variable | Meaning |
-|---|---|
-| `LENDING_POOL_PROXY` | Canonical V1 proxy and Safe transaction target. |
-| `EXPECTED_V1_IMPLEMENTATION` | V1 implementation expected in the proxy's ERC-1967 slot before preparation. |
-| `EXPECTED_UPGRADE_AUTHORITY` | Official Safe address expected as the active authority. |
-| `EXPECTED_PENDING_UPGRADE_AUTHORITY` | Expected pending authority; use the zero-address sentinel when no transfer is pending. |
-| `EXPECTED_CHAIN_ID` | Expected Sepolia chain ID, `11155111`. |
+## 5. Preparation workflow
 
-### Post-upgrade verification: `VerifyLendingPoolV1_1Upgrade.s.sol`
-
-| Variable | Meaning |
-|---|---|
-| `EXPECTED_CHAIN_ID` | Expected Sepolia chain ID, `11155111`. |
-| `LENDING_POOL_PROXY` | Canonical proxy expected to have been upgraded. |
-| `EXPECTED_OLD_IMPLEMENTATION` | V1 implementation expected to be inactive after the upgrade. |
-| `EXPECTED_NEW_IMPLEMENTATION` | Prepared V1.1 implementation expected in the ERC-1967 slot. |
-| `EXPECTED_UPGRADE_AUTHORITY` | Official Safe address expected to remain active. |
-| `EXPECTED_PENDING_UPGRADE_AUTHORITY` | Expected pending authority, normally the zero-address sentinel. |
-| `EXPECTED_PRE_UPGRADE_STATE_HASH` | State hash emitted by the matching preparation run. |
-
-### Educational dependency deployment: `DeploySepoliaDemoDependencies.s.sol`
-
-| Variable | Meaning |
-|---|---|
-| `EXPECTED_CHAIN_ID` | Must be Sepolia chain ID, `11155111`. |
-| `DEMO_TOKEN_HOLDER` | Nonzero holder receiving each token's complete fixed initial supply. |
-| `COLLATERAL_INITIAL_SUPPLY` | Nonzero initial raw supply for 18-decimal `sdETH`. |
-| `DEBT_INITIAL_SUPPLY` | Nonzero initial raw supply for 18-decimal `sdUSD`. |
-| `PRICE_FEED` | Explicit external Chainlink ETH/USD proxy address; verify immediately before broadcast. |
-| `MAX_PRICE_STALENESS` | Nonzero maximum accepted feed age in seconds. |
-
-### Educational representative flow: `RunSepoliaDemoFlow.s.sol`
-
-Run this only after the dependency and V1 deployment verification records have been reviewed. It uses one configured external demo actor for operational simplicity; that actor must be distinct from the official Safe and has no upgrade authority. This is an educational single-actor smoke flow, not evidence of multi-party economic independence, production readiness, or formal verification.
-
-| Variable | Meaning |
-|---|---|
-| `EXPECTED_CHAIN_ID` | Must be Sepolia chain ID, `11155111`. |
-| `LENDING_POOL_PROXY` | Canonical deployed LendingPool proxy. |
-| `COLLATERAL_VAULT` | Deployed non-upgradeable CollateralVault. |
-| `COLLATERAL_TOKEN` | Deployed 18-decimal `Sepolia Demo Ether` (`sdETH`). |
-| `DEBT_TOKEN` | Deployed 18-decimal `Sepolia Demo USD` (`sdUSD`). |
-| `PRICE_FEED` | Explicit external official Chainlink Sepolia ETH/USD proxy, 8 decimals. |
-| `EXPECTED_SAFE_AUTHORITY` | Official 2-of-2 Safe expected to be the sole active upgrade authority. |
-| `DEMO_ACTOR` | External Foundry-account address that performs every user operation; never the Safe. |
-| `LIQUIDITY_DEPOSIT_AMOUNT` | Exact `sdUSD` amount deposited as pool liquidity. |
-| `COLLATERAL_DEPOSIT_AMOUNT` | Exact `sdETH` amount deposited as collateral. |
-| `BORROW_AMOUNT` | Exact `sdUSD` amount borrowed. |
-| `PARTIAL_REPAY_AMOUNT` | Nonzero `sdUSD` repayment, strictly less than `BORROW_AMOUNT`. |
-
-For any future independently reviewed run, the script first performs a read-only preflight and dry-run. A human must make the separate, explicit decision to add `--broadcast`; no command in this runbook authorizes broadcast by default. When authorized, use the configured actor's external Foundry account and record seven separate Ethereum transaction hashes, in this exact order: debt-token approval; liquidity deposit; collateral-token approval; collateral deposit; borrow; fresh debt-token repayment approval; and nonzero partial repayment. Record the script output, all seven transaction hashes, configured amounts, actor/pool/vault/token/feed/Safe addresses, before/after token balances, liquidity position, collateral shares, scaled debt, and confirmation that the authority and pending-authority sentinel remained unchanged. The flow never deploys, transfers demo tokens directly, withdraws, liquidates, or invokes an authority/upgrade operation.
-
-### Asset dependency preflight
-
-#### Educational Sepolia demo dependencies
-
-`SepoliaDemoERC20` is the repository-controlled educational dependency used for the recorded public Sepolia V1 demonstration and may be used only for a separately reviewed educational redeployment. It is instantiated as `Sepolia Demo Ether` (`sdETH`) for ETH-like collateral and `Sepolia Demo USD` (`sdUSD`) for USD-like debt. Both tokens have 18 decimals, a fixed supply minted once at construction, standard exact-transfer OpenZeppelin ERC-20 behavior, and no rebasing or privileged token mechanism. Neither token represents production token infrastructure.
-
-The debt/collateral price dependency remains an external official Chainlink Sepolia ETH/USD AggregatorV3 proxy. It supplies USD per one ETH and is not deployed or controlled by this repository. Immediately before any dependency broadcast, independently verify the exact feed address against the official Chainlink directory and its Sepolia on-chain runtime state; do not replace the explicit `PRICE_FEED` deployment input with a repository constant. With 18-decimal `sdETH`, an ETH/USD price normalized to WAD, and 18-decimal `sdUSD`, `collateralRaw * priceWad / 1e18` produces `sdUSD` raw units.
-
-The recorded V1 deployment passed the official Safe directly as `INITIAL_UPGRADE_AUTHORITY` during atomic proxy initialization. The active authority was therefore the Safe, the pending authority was zero, and the deployer was never temporarily granted protocol upgrade authority or transferred out of that role afterward. Any later independent deployment must preserve and independently verify this property.
-
-The canonical Phase 1 asset and callback boundary is defined in [Asset and callback boundary](../README.md#asset-and-callback-boundary). The deployment operator and dependency reviewers must complete this checklist before setting `COLLATERAL_ASSET` or `DEBT_ASSET` and before approving the V1 deployment:
-
-- [ ] confirm the network is Sepolia (`11155111`) and independently resolve each exact token address from the reviewed deployment record;
-- [ ] record whether each token is a repository-controlled testnet mock or an external dependency, and verify its name and symbol when those metadata functions are available;
-- [ ] fetch the deployed runtime bytecode at each address, record its hash, and match it to verified source or a reproducible repository build and deployment workflow;
-- [ ] read and record each token's decimals from the selected Sepolia contract;
-- [ ] establish with source/bytecode review and controlled transfer evidence that `transfer` and `transferFrom` debit the sender and credit the recipient by exactly the requested amount, with no fee, tax, burn, reflection, or recipient-side deduction;
-- [ ] cover both protocol directions for the debt asset (account to pool for liquidity deposits, repayments, and liquidations; pool to account for borrowing and liquidity withdrawals);
-- [ ] cover all protocol and vault directions for the collateral asset (account to pool, pool to vault, vault to pool or liquidator, and pool to withdrawing account);
-- [ ] establish with source/bytecode review and balance observations across the controlled demonstration window that neither token rebases nor changes balances autonomously;
-- [ ] verify the price feed's base/quote meaning and decimals, then demonstrate that `collateralRawAmount * priceWad / 1e18` produces debt-asset raw units for representative and boundary values; and
-- [ ] have the deployment operator and dependency reviewers sign off on the evidence record before broadcast.
-
-The deployment script's code-length and `balanceOf` probes do not prove these properties. Successful ERC-20 calls and matching decimals are also insufficient on their own. If any identity, bytecode, behavior, decimals, or unit evidence is missing or inconsistent, do not deploy with that dependency.
-
-Verified public Sepolia dependency and deployment evidence now exists in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). It records the repository-controlled fixed-supply demo assets sdETH and sdUSD, including their public addresses, metadata roles, verified-source links, deployment transactions, and representative flow. This evidence applies only to the recorded deployment; any later redeployment must independently repeat dependency, bytecode, decimal, unit, oracle, and behavioral checks rather than blindly reusing the recorded evidence.
-
-## 5. Commands
-
-Replace every angle-bracketed placeholder before running a command. `<SEPOLIA_RPC_URL_OR_ALIAS>` identifies the Sepolia endpoint. `<EXTERNAL_FOUNDRY_DEPLOYER_ACCOUNT>` is an account name from Foundry's external default keystore, not a key or mnemonic. These templates do not authorize a real run until the dependencies, values, and controlled window have been reviewed.
-
-### Clean local preflight
+Do not run this public-chain command without a separate explicit deployment authorization. A local rehearsal can call the script's non-broadcast `prepare` path through its tests. For an authorized public preparation, use an externally configured Foundry account:
 
 ```bash
-forge clean
-forge build
-forge test -vv
-forge fmt --check
-```
-
-### Deploy V1 with atomic proxy initialization and the Safe as authority
-
-```bash
-COLLATERAL_ASSET="<COLLATERAL_ASSET_ADDRESS>" \
-DEBT_ASSET="<DEBT_ASSET_ADDRESS>" \
-PRICE_FEED="<PRICE_FEED_ADDRESS>" \
-COLLATERAL_VAULT_NAME="<COLLATERAL_VAULT_NAME>" \
-COLLATERAL_VAULT_SYMBOL="<COLLATERAL_VAULT_SYMBOL>" \
-MAX_PRICE_STALENESS="<MAX_PRICE_STALENESS_SECONDS>" \
-LTV_BPS="<LTV_BPS>" \
-LIQUIDATION_THRESHOLD_BPS="<LIQUIDATION_THRESHOLD_BPS>" \
-LIQUIDATION_BONUS_BPS="<LIQUIDATION_BONUS_BPS>" \
-BASE_BORROW_RATE="<BASE_BORROW_RATE_WAD>" \
-BORROW_RATE_SLOPE="<BORROW_RATE_SLOPE_WAD>" \
-INITIAL_UPGRADE_AUTHORITY="<OFFICIAL_SAFE_ADDRESS>" \
 EXPECTED_CHAIN_ID="11155111" \
-forge script script/DeployLendingPoolV1.s.sol:DeployLendingPoolV1 \
+LENDING_POOL_PROXY="<CANONICAL_PROXY>" \
+EXPECTED_CURRENT_IMPLEMENTATION="<ACTIVE_V1_OR_V1_1_IMPLEMENTATION>" \
+EXPECTED_UPGRADE_AUTHORITY="<SAFE_ADDRESS>" \
+EXPECTED_PENDING_UPGRADE_AUTHORITY="0x0000000000000000000000000000000000000000" \
+TRACKED_ACCOUNT_SET_IS_COMPLETE="<true-or-false>" \
+TRACKED_ACCOUNTS="<SORTED_COMMA_SEPARATED_ADDRESSES>" \
+forge script script/UpgradeLendingPoolV1_2.s.sol:UpgradeLendingPoolV1_2 \
   --rpc-url "<SEPOLIA_RPC_URL_OR_ALIAS>" \
-  --account "<EXTERNAL_FOUNDRY_DEPLOYER_ACCOUNT>" \
+  --account "<EXTERNAL_IMPLEMENTATION_DEPLOYER_ACCOUNT>" \
   --broadcast \
   -vvvv
 ```
 
-### Deploy V1.1 and prepare the Safe transaction
+The only broadcast operation inside `run()` is `new LendingPoolV1_2()`. Before construction, the script snapshots the predicted deployment address's incidental token and vault-share balances. After construction, the broadcast boundary closes and all remaining work is read-only. The script directly authenticates the constructed candidate rather than accepting an arbitrary candidate address.
+
+Preparation validates:
+
+- chain, proxy code, expected current implementation code and implementation-slot identity;
+- current implementation ERC-1822 UUID;
+- active and pending upgrade authorities, including code at the configured contract authority;
+- proxy initializer version 1 and non-initializing state;
+- candidate code, distinct addresses, V1.2 version, correct UUID, and constructor-locked initializers;
+- the exact post-construction runtime `extcodehash`; and
+- absence of candidate-deployment changes to proxy evidence or recorded implementation balances.
+
+The runtime hash is captured from the exact deployed address. UUPS embeds an immutable `__self`, so hashes from different deployment addresses are not assumed identical even when produced from the same source.
+
+## 6. Preparation evidence
+
+The state fingerprint is domain-separated and binds:
+
+- chain ID, proxy, old and new implementation addresses, and the new runtime code hash;
+- raw protocol slots 0–17 and the Initializable namespace word;
+- active and pending authority;
+- every dependency, risk parameter, and rate parameter;
+- stored index, timestamp, aggregate collateral shares, liquidity, and scaled debt;
+- proxy direct collateral and debt balances, proxy vault shares, vault total assets and supply, and vault collateral balance;
+- the canonical tracked-account snapshots and completeness flag; and
+- old and new implementation incidental token and vault-share balances at preparation.
+
+The prepared record also contains:
+
+- the exact target, value, and calldata;
+- the pre-upgrade state hash;
+- a payload fingerprint binding chain, expected authority, target, value, and calldata;
+- a commitment to the ordered tracked-account list; and
+- a preparation-attestation digest over the identities, candidate hash, commitments, state hash, and payload.
+
+Preserve the full ABI-encoded pre-upgrade state and every printed field. Preserve the preparation-attestation digest independently from that evidence bundle—for example, in a separately controlled review record—and later supply that exact trusted value to the verifier.
+
+The digest is not a signature, Safe transaction hash, candidate deployment receipt, registry record, or on-chain attestation. It detects evidence or payload substitution only if the original externally preserved digest remains trusted. If an actor replaces both the evidence bundle and the digest supplied as its trust root, a purely local verifier cannot distinguish the replacement. Stronger provenance would require an external signature, immutable registry, verified receipt, or other independent authority.
+
+## 7. Fresh preflight and state freeze
+
+The preparation hash is evidence, not a proxy transaction guard. State may change after preparation. Immediately before Safe confirmation and execution:
+
+1. establish a controlled window with no protocol actions, authority changes, custody changes, or representative flows;
+2. rerun the read-only preflight against the exact expected chain, proxy, implementation, authority, and tracked accounts;
+3. compare current state with the preserved preparation evidence;
+4. confirm the candidate runtime code hash still matches; and
+5. abandon the transaction if any relevant state or identity changed.
+
+If state changes, discard the stale Safe proposal and evidence for execution purposes, rerun deployment/preparation as required by the reviewed procedure, and restart both-owner review with the new exact payload and trust root.
+
+## 8. Safe review and execution
+
+For the recorded demonstration, the operator must complete the following review for both owner accounts before providing the two required approvals. In a real deployment, each independently controlled signer should perform the review under its governance procedures:
+
+- Sepolia chain ID `11155111`, the recorded Safe address, owner set, and 2-of-2 threshold;
+- exact proxy `to`, zero `value`, and byte-for-byte prepared `data`;
+- `CALL` operation value `0`;
+- exact candidate address and authenticated runtime hash;
+- outer and inner selectors and decoded arguments;
+- expected current implementation, active authority, and pending-authority sentinel;
+- exact applicable Safe nonce and all other Safe transaction fields;
+- independently derived cryptographic `safeTxHash`; and
+- each owner's confirmation of that exact hash, operation, and nonce.
+
+Do not confuse a Safe Transaction Service proposal identifier with the cryptographic `safeTxHash`. After execution, record the separate Ethereum execution transaction hash and obtain the V1.2 activation timestamp from authenticated execution/block evidence. The local verifier checks state, not receipts or logs.
+
+## 9. Verification inputs
+
+The read-only verifier reads:
+
+| Variable | Meaning |
+| --- | --- |
+| `EXPECTED_CHAIN_ID` | Expected chain ID |
+| `LENDING_POOL_PROXY` | Canonical proxy |
+| `EXPECTED_OLD_IMPLEMENTATION` | Implementation active during preparation |
+| `EXPECTED_NEW_IMPLEMENTATION` | Prepared V1.2 candidate |
+| `EXPECTED_NEW_IMPLEMENTATION_CODE_HASH` | Candidate runtime hash recorded at preparation |
+| `EXPECTED_UPGRADE_AUTHORITY` | Expected unchanged active authority |
+| `EXPECTED_PENDING_UPGRADE_AUTHORITY` | Expected unchanged pending authority |
+| `TRACKED_ACCOUNT_SET_IS_COMPLETE` | Preparation completeness flag |
+| `TRACKED_ACCOUNTS` | Exact ordered preparation account list |
+| `EXPECTED_V1_2_ACTIVATION_TIMESTAMP` | Timestamp of atomic migration execution |
+| `EXPECTED_PRE_UPGRADE_STATE_HASH` | Preparation state hash |
+| `EXPECTED_TRACKED_ACCOUNT_COMMITMENT` | Preparation list commitment |
+| `PREPARED_TARGET` | Exact prepared proxy target |
+| `PREPARED_VALUE` | Exact prepared value, zero |
+| `PREPARED_CALLDATA` | Exact prepared atomic migration calldata |
+| `EXPECTED_PREPARED_PAYLOAD_FINGERPRINT` | Preparation payload fingerprint |
+| `TRUSTED_PREPARATION_ATTESTATION_DIGEST` | Independently preserved trust root |
+| `PRE_UPGRADE_STATE_ABI` | Full ABI-encoded preparation state |
+
+Run without `--broadcast` and without a broadcaster account:
 
 ```bash
-LENDING_POOL_PROXY="<LENDING_POOL_PROXY_ADDRESS>" \
-EXPECTED_V1_IMPLEMENTATION="<V1_IMPLEMENTATION_ADDRESS>" \
-EXPECTED_UPGRADE_AUTHORITY="<OFFICIAL_SAFE_ADDRESS>" \
-EXPECTED_PENDING_UPGRADE_AUTHORITY="0x0000000000000000000000000000000000000000" \
 EXPECTED_CHAIN_ID="11155111" \
-forge script script/UpgradeLendingPoolV1_1.s.sol:UpgradeLendingPoolV1_1 \
+LENDING_POOL_PROXY="<CANONICAL_PROXY>" \
+EXPECTED_OLD_IMPLEMENTATION="<PREPARATION_OLD_IMPLEMENTATION>" \
+EXPECTED_NEW_IMPLEMENTATION="<PREPARED_V1_2_IMPLEMENTATION>" \
+EXPECTED_NEW_IMPLEMENTATION_CODE_HASH="<PREPARED_CODE_HASH>" \
+EXPECTED_UPGRADE_AUTHORITY="<SAFE_ADDRESS>" \
+EXPECTED_PENDING_UPGRADE_AUTHORITY="0x0000000000000000000000000000000000000000" \
+TRACKED_ACCOUNT_SET_IS_COMPLETE="<PREPARATION_VALUE>" \
+TRACKED_ACCOUNTS="<EXACT_PREPARATION_LIST>" \
+EXPECTED_V1_2_ACTIVATION_TIMESTAMP="<EXECUTION_BLOCK_TIMESTAMP>" \
+EXPECTED_PRE_UPGRADE_STATE_HASH="<PREPARATION_STATE_HASH>" \
+EXPECTED_TRACKED_ACCOUNT_COMMITMENT="<PREPARATION_ACCOUNT_COMMITMENT>" \
+PREPARED_TARGET="<PREPARATION_TARGET>" \
+PREPARED_VALUE="0" \
+PREPARED_CALLDATA="<PREPARATION_CALLDATA>" \
+EXPECTED_PREPARED_PAYLOAD_FINGERPRINT="<PREPARATION_PAYLOAD_FINGERPRINT>" \
+TRUSTED_PREPARATION_ATTESTATION_DIGEST="<INDEPENDENTLY_PRESERVED_DIGEST>" \
+PRE_UPGRADE_STATE_ABI="<PREPARATION_STATE_ABI>" \
+forge script script/VerifyLendingPoolV1_2Upgrade.s.sol:VerifyLendingPoolV1_2Upgrade \
   --rpc-url "<SEPOLIA_RPC_URL_OR_ALIAS>" \
-  --account "<EXTERNAL_FOUNDRY_DEPLOYER_ACCOUNT>" \
-  --broadcast \
   -vvvv
 ```
 
-This command broadcasts only the V1.1 implementation deployment. Its output is the proxy, expected current implementation, new implementation, expected upgrade authority, prepared Safe target, zero value, exact `upgradeToAndCall` calldata, and pre-upgrade state hash. Foundry does not execute the upgrade, submit a Safe proposal, impersonate the Safe, or supply or control its operation or nonce. Safe operation and nonce selection intentionally remain part of the external Safe workflow.
+## 10. Verification verdict
 
-### Verify immediately after Safe execution
+The verifier fails unless it confirms:
 
-```bash
-EXPECTED_CHAIN_ID="11155111" \
-LENDING_POOL_PROXY="<LENDING_POOL_PROXY_ADDRESS>" \
-EXPECTED_OLD_IMPLEMENTATION="<V1_IMPLEMENTATION_ADDRESS>" \
-EXPECTED_NEW_IMPLEMENTATION="<PREPARED_V1_1_IMPLEMENTATION_ADDRESS>" \
-EXPECTED_UPGRADE_AUTHORITY="<OFFICIAL_SAFE_ADDRESS>" \
-EXPECTED_PENDING_UPGRADE_AUTHORITY="0x0000000000000000000000000000000000000000" \
-EXPECTED_PRE_UPGRADE_STATE_HASH="<PRE_UPGRADE_STATE_HASH>" \
-forge script script/VerifyLendingPoolV1_1Upgrade.s.sol:VerifyLendingPoolV1_1Upgrade \
-  --rpc-url "<SEPOLIA_RPC_URL_OR_ALIAS>" \
-  -vvvv
-```
+- the trusted preparation digest, state hash, tracked-account commitment, and canonical payload all agree;
+- the proxy implementation slot contains the expected candidate and no longer contains the old implementation;
+- the candidate runtime hash, UUID, and proxy-reported version are V1.2;
+- Initializable is at version 2 and is not initializing;
+- authority, configuration, frozen slots other than index/timestamp, aggregates, tracked leaves, and authoritative custody are unchanged;
+- the stored boundary index equals an independent calculation using the exact historical formula through the activation timestamp;
+- the stored checkpoint timestamp equals that activation timestamp; and
+- the current utilization-derived rate and RAY-accrued current index match independent calculations after activation.
 
-The verifier command intentionally has no `--broadcast` and consumes no broadcaster or Safe-owner account.
+The migration intentionally changes the implementation slot, initializer version, stored borrow index, and last-index timestamp. Existing scaled debt is preserved; the verifier does not expect a scaled-balance rewrite.
 
-## 6. Safe transaction review checklist
+## 11. Incidental implementation balances
 
-Before either Safe owner confirms, both reviewers must independently verify:
+Construction-time continuity remains relevant: the preparation flow records balances at the predicted candidate address and rejects changes caused during typed deployment/preparation. This helps show that deployment itself did not move protocol assets.
 
-- [ ] the connected network is Sepolia and the chain ID is `11155111`;
-- [ ] the submitting Safe address is the recorded official Safe and its threshold is 2-of-2;
-- [ ] `to` exactly equals the canonical `LendingPool` proxy and the preparation output's target;
-- [ ] `value` is exactly `0`;
-- [ ] `data` exactly equals the complete prepared `upgradeToAndCall` calldata, byte for byte;
-- [ ] `operation` is `CALL`, with numeric operation value `0`;
-- [ ] the exact Safe nonce is recorded and matches both the Safe transaction proposed for confirmation and the Safe's applicable on-chain/current transaction state for execution;
-- [ ] both owner A and owner B have reviewed the exact `CALL (0)` operation and exact nonce before either owner confirms;
-- [ ] the exact cryptographic Safe transaction hash (`safeTxHash`) is independently derived for the reviewed Safe address and chain, `to`, `value`, `data`, `operation = CALL (0)`, exact nonce, and every other Safe transaction field that participates in the hash; and
-- [ ] both owner A and owner B confirm that exact `safeTxHash`, not merely a proposal or UI identifier;
-- [ ] the calldata selector is `upgradeToAndCall(address,bytes)` (`0x4f1ef286`);
-- [ ] the first argument exactly equals the prepared V1.1 implementation;
-- [ ] the second argument is empty bytes;
-- [ ] the current ERC-1967 implementation is the expected V1 implementation;
-- [ ] the active upgrade authority is the Safe;
-- [ ] the pending upgrade authority equals the expected sentinel, normally the zero address;
-- [ ] the prepared pre-upgrade state hash is recorded with the transaction evidence; and
-- [ ] the preparation checks validated the V1 and V1.1 implementation UUIDs and the V1.1 version.
+After preparation, anyone may send tokens or vault shares directly to either implementation. Those balances are incidental and are not protocol custody. Post-verification reports preparation and observed values plus exact per-asset change flags, but implementation dust does not change the core verdict.
 
-`DELEGATECALL` (numeric operation value `1`) is prohibited: it would execute the calldata in the Safe's context rather than call the canonical `LendingPool` proxy. Any operation mismatch invalidates the proposal.
+Proxy and vault custody remain authoritative. Any unexpected proxy debt balance, proxy direct collateral balance, proxy vault-share balance, vault assets, vault supply, or vault collateral balance fails verification. Never weaken those checks because an implementation balance appears harmless.
 
-Preparation intentionally does not fetch, guess, supply, or control the Safe nonce because proposal, confirmation, and execution remain external to the repository tooling. If the reviewed nonce becomes stale or conflicts with the Safe's applicable current transaction state, do not silently substitute another nonce after owner review. Regenerate the external Safe proposal with the applicable nonce, derive and record its new exact `safeTxHash`, and restart both-owner review before either owner confirms.
+## 12. Fail-closed and rollback procedure
 
-A Safe Transaction Service proposal ID or UI identifier may be recorded as optional supplemental evidence, but it is not the cryptographic `safeTxHash` and must never replace it.
+- **Preparation failure:** no payload is accepted; preserve the error and diagnose it.
+- **State change before execution:** do not execute stale calldata; discard the stale proposal and restart preparation and owner review.
+- **Migration revert:** the EVM rolls back the implementation slot and all migration writes. Confirm the old implementation remains active before taking any further action.
+- **Inactive empty-data install:** do not treat it as successful. Accounting calls fail closed; recovery is a separately authorized action, not the planned workflow.
+- **Verification failure:** do not report the upgrade as verified. Preserve preparation output, independent digest, Safe confirmations, execution transaction, verifier logs, and explorer evidence. Inspect every mismatch and intervening transaction.
+- **Response:** never perform an automatic corrective upgrade. Any response requires its own design, preparation, review, and Safe authorization.
 
-Any mismatch invalidates the review. Do not edit decoded arguments, operation, or nonce silently; discard the mismatched Safe proposal and create a new external proposal from the reviewed preparation output and applicable Safe nonce.
+## 13. Public evidence record
 
-### Final execution-approval checkpoint
+The historical V1 addresses and transactions remain canonical in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). Do not overwrite that record with local rehearsal values.
 
-Immediately before approving execution, both owners must complete this checkpoint against the exact Safe proposal. No pre-execution item below may remain `PENDING`; Section 9's upgrade-specific `PENDING` values describe the future public V1-to-V1.1 upgrade only.
+For any future public V1.2 operation, leave every field `PENDING` until independently evidenced:
 
-- [ ] `to`, `value`, and `data` match the reviewed preparation output exactly;
-- [ ] operation name `CALL` and numeric operation value `0` are recorded and unchanged;
-- [ ] the exact Safe nonce is recorded, unchanged from both-owner review, and still matches the Safe's applicable on-chain/current transaction state;
-- [ ] the exact `safeTxHash` derived from every reviewed hash-participating Safe transaction field is recorded;
-- [ ] owner A's confirmation and owner B's confirmation for this exact `safeTxHash`, operation, and nonce are separately recorded; and
-- [ ] both owners approve execution of this exact confirmed proposal.
+| Future V1.2 evidence | Status |
+| --- | --- |
+| Reviewed commit and build identity | `PENDING` |
+| V1.2 implementation address, deployment transaction, and runtime code hash | `PENDING` |
+| Preparation state ABI/hash, payload fingerprint, account commitment, and independently preserved attestation digest | `PENDING` |
+| Exact target, value, calldata, Safe operation, and nonce | `PENDING` |
+| Exact cryptographic `safeTxHash` and both owner confirmations | `PENDING` |
+| Executed Ethereum transaction hash and activation timestamp | `PENDING` |
+| Read-only verifier output and incidental-balance report | `PENDING` |
+| Explorer source-verification links, if completed | `PENDING` |
 
-After execution, record the executed Ethereum transaction hash in its separate evidence field immediately. Do not use the `safeTxHash`, a Safe Transaction Service proposal ID, or a UI identifier as a substitute, and do not report the ceremony complete while the executed Ethereum transaction hash remains `PENDING`.
-
-## 7. Fingerprint semantics
-
-Preparation and verification are separate processes on opposite sides of an externally executed Safe transaction. A cross-run fingerprint is therefore required to bind the independently observed post-upgrade state to the state and exact implementation pair recorded during preparation.
-
-The v2 fingerprint is domain-separated and covers:
-
-- chain ID, proxy address, and the expected old and new implementation addresses;
-- the raw values of legacy slots 0 through 17;
-- active and pending upgrade-authority addresses;
-- configuration: price feed, vault, debt asset, collateral asset, maximum price staleness, LTV, liquidation threshold, liquidation bonus, base borrow rate, and borrow-rate slope;
-- accounting totals: borrow index, last index-update timestamp, total collateral shares, total liquidity, and total scaled debt;
-- custody observations: direct proxy collateral-asset balance, proxy debt-asset balance, proxy vault-share balance, vault total assets, vault total supply, and the vault's collateral-asset balance; and
-- for both the old and new implementation addresses, collateral-asset balance, debt-asset balance, and vault-share balance.
-
-The proxy's ERC-1967 implementation-slot value is intentionally excluded because that slot must change from V1 to V1.1. The expected old and new implementation addresses are included instead, and the verifier separately requires the slot to contain the expected V1.1 address.
-
-Unchanged unsolicited token or vault-share dust at either implementation address and unchanged direct proxy collateral dust are included and accepted; the tooling does not require those balances to be zero. Changes to any fingerprinted custody or protocol-state value, including any direct proxy collateral delta during the controlled window, cause a mismatch. A legitimate protocol action between preparation and verification also changes the relevant state and causes a mismatch, which is why Section 8 requires a controlled state freeze.
-
-Raw mapping seed slots do not enumerate or cryptographically prove every mapping entry. Representative borrower, collateral-provider, and liquidity-provider positions are covered separately by the integration tests. The fingerprint is operational evidence for this controlled demonstration, not formal verification or a proof of all possible state.
-
-## 8. State-freeze procedure
-
-Establish a controlled window that begins immediately before V1.1 preparation and ends only after Safe execution and successful read-only verification. During that window, do not perform representative flows, protocol actions, authority transfers, custody movements, or other transactions that can change the fingerprinted state. Review and execute promptly enough to make intervening activity easy to audit.
-
-If protocol state changes before Safe execution:
-
-1. Do not execute the stale calldata or rely on its stale state evidence.
-2. Discard the stale prepared Safe transaction.
-3. Rerun the deploy-and-prepare command.
-4. Use only the newly prepared implementation address, target, value, calldata, and state hash.
-5. Restart both-owner review from the beginning.
-
-If verification fails after Safe execution:
-
-1. Do not report the upgrade as successfully verified.
-2. Preserve the preparation output, verifier logs, Safe confirmations, execution transaction, and relevant explorer evidence.
-3. Inspect the ERC-1967 implementation slot, active and pending authorities, proxy and vault state, implementation custody, and every intervening transaction.
-4. Do not perform an automatic corrective upgrade. Diagnose and review any proposed response as a separate operation.
-
-## 9. Public evidence checklist
-
-### Recorded public V1 deployment
-
-The public Sepolia V1 deployment and representative on-chain flow are complete. Canonical addresses, transaction hashes, authority state, source-verification status, and flow evidence are maintained in [SEPOLIA_DEPLOYMENT.md](SEPOLIA_DEPLOYMENT.md). Do not duplicate or fork that canonical record in this runbook.
-
-### Future V1 redeployment template
-
-This is a blank template for a new, independently reviewed V1 deployment. Every field starts `PENDING` for that new run. These placeholders do not describe the completed recorded deployment, must not be filled by copying its evidence, and are not evidence. Do not invent a missing address, hash, result, link, or report.
-
-| New V1 deployment evidence | New-run value |
-|---|---|
-| Commit SHA | `PENDING` |
-| Sepolia chain ID | `PENDING` |
-| Safe address and 2-of-2 threshold | `PENDING` |
-| Safe owner A address | `PENDING` |
-| Safe owner B address | `PENDING` |
-| Collateral dependency: role, Sepolia address, name, symbol, decimals, and repository-controlled mock or external classification | `PENDING` |
-| Collateral dependency: deployed runtime bytecode hash and source/build/deployment identity evidence | `PENDING` |
-| Collateral dependency: exact-transfer evidence for account → pool → vault and vault → pool/liquidator or pool → account paths | `PENDING` |
-| Collateral dependency: non-rebasing and no-autonomous-balance-change evidence | `PENDING` |
-| Debt dependency: role, Sepolia address, name, symbol, decimals, and repository-controlled mock or external classification | `PENDING` |
-| Debt dependency: deployed runtime bytecode hash and source/build/deployment identity evidence | `PENDING` |
-| Debt dependency: exact-transfer evidence for account → pool and pool → account paths | `PENDING` |
-| Debt dependency: non-rebasing and no-autonomous-balance-change evidence | `PENDING` |
-| Collateral/debt decimals and oracle/token raw-unit compatibility calculation | `PENDING` |
-| Price-feed address | `PENDING` |
-| CollateralVault address | `PENDING` |
-| V1 implementation address | `PENDING` |
-| LendingPool proxy address | `PENDING` |
-| V1 deployment transaction | `PENDING` |
-| Representative V1 flow transaction hash or hashes | `PENDING` |
-
-### Future public V1-to-V1.1 upgrade evidence
-
-No public V1-to-V1.1 upgrade has occurred. Every upgrade-specific field below remains `PENDING` until the separate Safe preparation, two-owner review, execution, verification, and evidence process is completed. Placeholders are not evidence and must not be replaced with invented values.
-
-| Future V1-to-V1.1 upgrade evidence | Pending value |
-|---|---|
-| V1.1 implementation address | `PENDING` |
-| V1.1 implementation-deployment transaction | `PENDING` |
-| Prepared target, value, and calldata | `PENDING` |
-| Safe operation name (`CALL`) | `PENDING` |
-| Safe operation numeric value (`0`) | `PENDING` |
-| Exact Safe nonce | `PENDING` |
-| Pre-upgrade state hash | `PENDING` |
-| Exact Safe transaction hash (`safeTxHash`) | `PENDING` |
-| Safe owner A confirmation for the exact `safeTxHash`, operation, and nonce | `PENDING` |
-| Safe owner B confirmation for the exact `safeTxHash`, operation, and nonce | `PENDING` |
-| Executed Ethereum transaction hash | `PENDING` |
-| Read-only verifier output | `PENDING` |
-| Contract-verification links | `PENDING` |
-| Final full-suite result | `PENDING` |
-| Final audit report reference | `PENDING` |
-
-## 10. Known limitations
-
-- This is a testnet and portfolio demonstration, not a production deployment or governance recommendation.
-- Both distinct Safe owner accounts are controlled by one repository author; the 2-of-2 ceremony demonstrates mechanics, not organizational independence.
-- There is no timelock, governance module, or repository-implemented multisig.
-- There is no production incident-response process.
-- No production-readiness, completed-final-audit, or formal-verification claim is made.
-- The fingerprint has the scope and mapping limitations described in Section 7 and cannot prove every mapping entry or all possible state.
-- V1.1 adds no mutable storage and preserves the complete V1 storage layout. It corrects the historical V1 liquidity-checkpoint discontinuity, while the other documented economic limitations remain unchanged. No public V1-to-V1.1 upgrade has occurred.
+Until those future fields are completed from authentic public evidence, the correct public status remains: canonical Sepolia V1 is live; V1.2 is a local upgrade candidate and has not been publicly deployed or installed.
