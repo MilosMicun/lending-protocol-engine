@@ -55,6 +55,7 @@ contract LendingPoolV1_2FuzzTest is Test, LendingPoolProxyFixture {
                 )
             )
         );
+        pool.migrateToV1_2();
 
         address[4] memory actors = [provider, userOne, userTwo, userThree];
         for (uint256 i; i < actors.length; ++i) {

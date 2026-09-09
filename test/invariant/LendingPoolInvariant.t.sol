@@ -62,6 +62,12 @@ contract LendingPoolInvariantTest is Test, LendingPoolProxyFixture {
         poolImplementation = _newImplementation();
         pool = _deployLendingPoolProxy(poolImplementation, config);
 
+        (bool hasVersion, bytes memory versionData) =
+            address(poolImplementation).staticcall(abi.encodeCall(LendingPoolV1_2.version, ()));
+        if (hasVersion && keccak256(bytes(abi.decode(versionData, (string)))) == keccak256(bytes("1.2"))) {
+            LendingPoolV1_2(address(pool)).migrateToV1_2();
+        }
+
         address[] memory users = new address[](3);
         users[0] = user1;
         users[1] = user2;

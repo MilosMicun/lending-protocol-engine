@@ -59,22 +59,39 @@ contract LendingPoolGoldenStorageLayoutTest is Test, LendingPoolProxyFixture {
         _assertCompilerLayout(V1_2_ARTIFACT, "LendingPool V1.2");
     }
 
-    function test_V1_2RetainsEveryV1SelectorAndAddsOnlyVersion() public view {
+    function test_ExactAbiCountsAndHistoricalSelectorsAreFrozen() public view {
         // forge-lint: disable-next-line(unsafe-cheatcode)
         string memory v1Artifact = vm.readFile(string.concat(vm.projectRoot(), "/", V1_ARTIFACT));
         // forge-lint: disable-next-line(unsafe-cheatcode)
+        string memory v11Artifact = vm.readFile(string.concat(vm.projectRoot(), "/", V1_1_ARTIFACT));
+        // forge-lint: disable-next-line(unsafe-cheatcode)
         string memory v12Artifact = vm.readFile(string.concat(vm.projectRoot(), "/", V1_2_ARTIFACT));
         string[] memory v1Selectors = vm.parseJsonKeys(v1Artifact, ".methodIdentifiers");
+        string[] memory v11Selectors = vm.parseJsonKeys(v11Artifact, ".methodIdentifiers");
         string[] memory v12Selectors = vm.parseJsonKeys(v12Artifact, ".methodIdentifiers");
 
-        assertEq(v12Selectors.length, v1Selectors.length + 1, "V1.2 external selector count");
+        assertEq(v1Selectors.length, 44, "V1 external selector count");
+        assertEq(v11Selectors.length, 45, "V1.1 external selector count");
+        assertEq(v12Selectors.length, 46, "V1.2 external selector count");
 
         for (uint256 i; i < v1Selectors.length; ++i) {
             string memory expected = _methodIdentifier(v1Artifact, v1Selectors[i]);
+            assertEq(_methodIdentifier(v11Artifact, v1Selectors[i]), expected, v1Selectors[i]);
             assertEq(_methodIdentifier(v12Artifact, v1Selectors[i]), expected, v1Selectors[i]);
         }
 
-        assertGt(bytes(_methodIdentifier(v12Artifact, "version()")).length, 0);
+        for (uint256 i; i < v11Selectors.length; ++i) {
+            assertEq(
+                _methodIdentifier(v12Artifact, v11Selectors[i]),
+                _methodIdentifier(v11Artifact, v11Selectors[i]),
+                v11Selectors[i]
+            );
+        }
+
+        assertEq(_methodIdentifier(v11Artifact, "version()"), "54fd4d50");
+        assertEq(_methodIdentifier(v12Artifact, "version()"), "54fd4d50");
+        assertEq(_methodIdentifier(v12Artifact, "migrateToV1_2()"), "cca9f262");
+        assertGt(bytes(_methodIdentifier(v12Artifact, "migrateToV1_2()")).length, 0);
     }
 
     function test_FrozenMappingSeedsLocateRepresentativeNonzeroLeaves() public {

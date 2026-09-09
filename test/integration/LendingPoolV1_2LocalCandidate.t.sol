@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
 import {LendingPoolProxyFixture} from "../helpers/LendingPoolProxyFixture.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -54,6 +55,7 @@ contract LendingPoolV1_2LocalCandidateIntegrationTest is Test, LendingPoolProxyF
                 )
             )
         );
+        pool.migrateToV1_2();
 
         address[5] memory actors = [providerOne, providerTwo, borrowerOne, borrowerTwo, liquidator];
         for (uint256 i; i < actors.length; ++i) {
@@ -109,15 +111,12 @@ contract LendingPoolV1_2LocalCandidateIntegrationTest is Test, LendingPoolProxyF
         assertEq(pool.version(), "1.2");
     }
 
-    function test_LocalCandidateExposesNoMigrationOrReinitializerEntryPoint() public {
+    function test_LocalCandidateRejectsRepeatedMigration() public {
         uint256 indexBefore = pool.borrowIndex();
         uint256 timestampBefore = pool.lastBorrowIndexUpdate();
 
-        (bool migrated,) = address(pool).call(abi.encodeWithSignature("migrateLegacyAccrual(uint256,bytes32)"));
-        (bool reinitialized,) = address(pool).call(abi.encodeWithSignature("initializeV2()"));
-
-        assertFalse(migrated);
-        assertFalse(reinitialized);
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        pool.migrateToV1_2();
         assertEq(pool.borrowIndex(), indexBefore);
         assertEq(pool.lastBorrowIndexUpdate(), timestampBefore);
     }

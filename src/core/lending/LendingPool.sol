@@ -194,6 +194,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function currentBorrowIndex() public view returns (uint256) {
+        _requireAccountingActive();
+
         uint256 timeElapsed = block.timestamp - lastBorrowIndexUpdate;
 
         if (timeElapsed == 0) {
@@ -221,6 +223,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function utilizationRate() public view returns (uint256) {
+        _requireAccountingActive();
+
         if (totalLiquidity == 0) return 0;
 
         uint256 debt = _storedTotalDebt();
@@ -254,6 +258,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function withdrawCollateral(uint256 amount) external {
+        _requireAccountingActive();
+
         if (amount == 0) revert ZeroAmount();
 
         uint256 sharesNeeded = vault.previewWithdraw(amount);
@@ -285,6 +291,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function depositLiquidity(uint256 amount) external {
+        _requireAccountingActive();
+
         if (amount == 0) revert ZeroAmount();
         debtAsset.safeTransferFrom(msg.sender, address(this), amount);
 
@@ -297,6 +305,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function withdrawLiquidity(uint256 amount) external {
+        _requireAccountingActive();
+
         if (amount == 0) revert ZeroAmount();
 
         uint256 balance = liquidityBalanceOf[msg.sender];
@@ -326,6 +336,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function borrow(uint256 amount) external {
+        _requireAccountingActive();
+
         if (amount == 0) revert ZeroAmount();
 
         _updateBorrowIndex();
@@ -343,6 +355,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function repay(uint256 amount) external {
+        _requireAccountingActive();
+
         if (amount == 0) revert ZeroAmount();
 
         _updateBorrowIndex();
@@ -359,6 +373,8 @@ contract LendingPool is Initializable, UUPSUpgradeable {
     }
 
     function liquidate(address borrower, uint256 repayAmount) external {
+        _requireAccountingActive();
+
         if (borrower == address(0)) revert ZeroAddress();
         if (msg.sender == borrower) revert SelfLiquidation();
         if (repayAmount == 0) revert ZeroAmount();
@@ -556,6 +572,10 @@ contract LendingPool is Initializable, UUPSUpgradeable {
 
     function _validateAccountingDomain(uint256) internal pure virtual {
         // V1 and V1.1 intentionally retain their unrestricted historical arithmetic domain.
+    }
+
+    function _requireAccountingActive() internal view virtual {
+        // V1 and V1.1 accounting is active immediately after initialization.
     }
 
     function _authorizeUpgrade(address) internal view override {

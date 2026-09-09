@@ -241,6 +241,16 @@ contract LendingPoolV1_2Test is Test, LendingPoolProxyFixture {
         pool.currentBorrowIndex();
     }
 
+    function test_ActiveAccountingRejectsIndexesBelowWadWithExactError() public {
+        _setBorrowIndex(pool, 0);
+        vm.expectRevert(abi.encodeWithSelector(LendingPoolV1_2.BorrowIndexTooLow.selector, 0, WAD));
+        pool.currentBorrowIndex();
+
+        _setBorrowIndex(pool, WAD - 1);
+        vm.expectRevert(abi.encodeWithSelector(LendingPoolV1_2.BorrowIndexTooLow.selector, WAD - 1, WAD));
+        pool.currentBorrowIndex();
+    }
+
     function test_EighteenDecimalDebtAssetIsSupported() public {
         assertEq(debtToken.decimals(), 18);
         vm.prank(borrower);
@@ -727,6 +737,12 @@ contract LendingPoolV1_2Test is Test, LendingPoolProxyFixture {
                 initialUpgradeAuthority: address(this)
             })
         );
+
+        (bool hasVersion, bytes memory versionData) =
+            address(candidateImplementation).staticcall(abi.encodeCall(LendingPoolV1_1.version, ()));
+        if (hasVersion && keccak256(bytes(abi.decode(versionData, (string)))) == keccak256(bytes("1.2"))) {
+            LendingPoolV1_2(address(candidate)).migrateToV1_2();
+        }
     }
 
     function _fundAndApproveActors(LendingPool candidate) internal {
